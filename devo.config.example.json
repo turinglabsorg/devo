@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "tenants": {
+    "letzgo": {
+      "provider": "gcp",
+      "projectName": "LETZGO",
+      "projectId": "inbound-pattern-489808-h0",
+      "projectNumber": "317340568577",
+      "gcloudConfiguration": "zonzolab",
+      "sourceRoot": "/Users/zencrust/GIT/@zonzolab",
+      "regions": ["us-central1"],
+      "defaultRegion": "us-central1",
+      "artifactRegistryRepo": "letzgo-repo",
+      "repositories": [
+        "letzgo-admin",
+        "letzgo-agent",
+        "letzgo-app",
+        "letzgo-be",
+        "letzgo-gate",
+        "letzgo-landing",
+        "letzgo-partners"
+      ],
+      "services": [
+        "letzgo-admin",
+        "letzgo-agent",
+        "letzgo-agent-worker",
+        "letzgo-app",
+        "letzgo-be",
+        "letzgo-gate",
+        "letzgo-landing",
+        "letzgo-partners"
+      ],
+      "labels": {
+        "client": "LETZGO"
+      },
+      "notes": "LETZGO on Google Cloud, linked to @zonzolab LetzGo repositories"
+    },
+    "example-aws": {
+      "provider": "aws",
+      "accountId": "123456789012",
+      "profile": "example",
+      "regions": ["eu-west-1"],
+      "defaultRegion": "eu-west-1",
+      "labels": {
+        "client": "Example"
+      }
+    }
+  }
+}
