@@ -1,22 +1,47 @@
 # Devo
 
-Devo is a DevOps-focused Codex skill for auditing GCP and AWS environments. It helps verify local cloud tooling, active accounts/projects, service inventory, logs, costs, and operational risk without changing infrastructure by default.
+Devo is a private Turing Labs DevOps specialist for Codex. It gives Codex a consistent way to audit cloud environments, map client aliases to real cloud projects, inspect service health, compare logs, and review cost signals across GCP and AWS.
 
-It supports tenant/project mapping through a local `devo.config.json`, so a client alias such as `letzgo` can resolve to a specific provider, GCP project, AWS account, profile, and region.
+The first implementation is a Codex skill plus a small Node.js CLI. It deliberately uses the user's existing `gcloud` and `aws` installations instead of storing cloud credentials or introducing a separate backend service.
 
-## Proposed Structure
+## What Devo Does
 
+- Checks local cloud tooling and active authentication.
+- Resolves tenant aliases such as `letzgo` to provider, project/account, regions, repositories, and services.
+- Produces safe command suggestions for service inventory, logs, costs, IAM, and billing checks.
+- Runs read-only readiness checks through `devo doctor`.
+- Guides Codex through cloud audits with scoped references for GCP, AWS, costs, logs, and tenants.
+
+Devo is read-only by default. It should not create, update, delete, restart, resize, rotate, or deploy cloud resources unless the user explicitly asks for that change.
+
+## Repository
+
+Private GitHub repo:
+
+```text
+git@github.com:turinglabsorg/devo.git
 ```
+
+Local monorepo path:
+
+```text
+/Users/zencrust/GIT/@turinglabs/@agentlab/devo
+```
+
+## Structure
+
+```text
 devo/
-├── AGENTS.md
-├── devo.config.example.json
-├── README.md
+├── AGENTS.md                    Repo-specific operating rules
+├── README.md                    Human-facing project documentation
+├── bin/
+│   └── devo                     Local repo wrapper
+├── devo.config.example.json     Committed tenant config example
 └── skill/
-    ├── SKILL.md
-    ├── agents/
-    │   └── openai.yaml
-    ├── index.js
-    ├── install.sh
+    ├── SKILL.md                 Codex skill entry point
+    ├── agents/openai.yaml       Skill UI metadata
+    ├── index.js                 CLI entry point
+    ├── install.sh               Installer for Codex skill + CLI
     ├── package.json
     ├── references/
     │   ├── aws.md
@@ -25,48 +50,171 @@ devo/
     │   ├── logs.md
     │   └── tenants.md
     └── scripts/
-        └── doctor.mjs
+        └── doctor.mjs           Tool/auth/tenant readiness checks
 ```
 
-Future scheduled audits, notification bridges, or long-running collectors should live under `devo/agent/`. The first version starts as a Codex skill because the current workflow is interactive investigation and command-driven diagnostics.
-
-## Local Usage
-
-```bash
-./bin/devo doctor --provider all
-./bin/devo tenants
-./bin/devo tenant letzgo
-./bin/devo doctor --tenant letzgo
-./bin/devo commands --tenant letzgo services
-./bin/devo commands gcp logs
-./bin/devo commands aws costs
-```
-
-## Tenant Config
-
-Local config lookup order:
-
-1. `./devo.config.json`
-2. `devo/devo.config.json` when running from this repo
-3. `~/.devo/config.json`
-
-`devo.config.json` is intentionally ignored by Git. Use [devo.config.example.json](./devo.config.example.json) as the committed schema/example.
+Future scheduled audits, notification bridges, or long-running collectors should live under a future `devo/agent/` boundary. The current version is intentionally interactive and command-driven.
 
 ## Install
+
+From the repo:
 
 ```bash
 cd devo/skill
 ./install.sh
 ```
 
-The installer copies the CLI to `${CODEX_HOME:-$HOME/.codex}/tools/devo`, the skill resources to `${CODEX_HOME:-$HOME/.codex}/skills/devo`, and the config example to `~/.devo/config.example.json`.
+The installer copies:
 
-It also creates a `devo` command in `~/.local/bin/devo` by default:
+- CLI runtime to `${CODEX_HOME:-$HOME/.codex}/tools/devo`
+- skill files to `${CODEX_HOME:-$HOME/.codex}/skills/devo`
+- config example to `~/.devo/config.example.json`
+- executable wrapper to `~/.local/bin/devo`
+
+Ensure `~/.local/bin` is in `PATH`. On this workstation it is configured in `~/.zshenv`, so non-interactive shells can run `devo` directly.
+
+Use a custom binary directory if needed:
+
+```bash
+DEVO_BIN_DIR="$HOME/bin" ./install.sh
+```
+
+## Configuration
+
+Real tenant configuration lives outside the repo:
+
+```text
+~/.devo/config.json
+```
+
+Local development can also use:
+
+```text
+./devo.config.json
+```
+
+`devo.config.json` is ignored by Git. Do not commit real tenant config if it contains operational metadata that should remain local. Never store secrets, access tokens, service account keys, passwords, or cloud credentials in Devo config.
+
+Config lookup order:
+
+1. `./devo.config.json`
+2. `devo/devo.config.json` when running from this repo
+3. `~/.devo/config.json`
+
+Use [`devo.config.example.json`](./devo.config.example.json) as the schema reference.
+
+## Tenant Example
+
+`letzgo` is configured as a GCP tenant:
+
+```json
+{
+  "provider": "gcp",
+  "projectName": "LETZGO",
+  "projectId": "inbound-pattern-489808-h0",
+  "projectNumber": "317340568577",
+  "gcloudConfiguration": "zonzolab",
+  "sourceRoot": "/Users/zencrust/GIT/@zonzolab",
+  "regions": ["us-central1"],
+  "defaultRegion": "us-central1",
+  "artifactRegistryRepo": "letzgo-repo"
+}
+```
+
+This lets Codex or an operator ask for `letzgo` instead of repeating the raw project ID, region, service list, and source root every time.
+
+## CLI Usage
 
 ```bash
 devo tenants
+devo tenant letzgo
 devo doctor --tenant letzgo
+devo doctor --provider all
+devo commands --tenant letzgo services
+devo commands --tenant letzgo logs
+devo commands gcp costs
+devo commands aws costs
+```
+
+When working from the repo without installing:
+
+```bash
+./bin/devo doctor --tenant letzgo
+node skill/index.js doctor --tenant letzgo
+```
+
+## Typical Workflows
+
+### Verify Local Cloud Readiness
+
+```bash
+devo doctor --tenant letzgo
+```
+
+This checks whether `gcloud` or `aws` are available, whether the active account is visible, and whether the configured tenant project/account is reachable.
+
+### Inspect GCP Services
+
+```bash
 devo commands --tenant letzgo services
 ```
 
-Set `DEVO_BIN_DIR` before running the installer to choose another binary directory.
+Then run the suggested provider commands with explicit `--project` and `--region` flags. Do not rely on global defaults for audit conclusions.
+
+### Review Logs
+
+```bash
+devo commands --tenant letzgo logs
+```
+
+Use concrete time windows and summarize log groups by service, severity, first/latest occurrence, and repeated signature. Avoid dumping full log payloads unless explicitly requested.
+
+### Review Costs
+
+```bash
+devo commands --tenant letzgo costs
+```
+
+Cost reviews should label numbers as estimated, forecasted, or historical invoiced spend. If BigQuery Billing Export exists, query it directly and group by service, SKU, project, location, labels, and day.
+
+## Safety Rules
+
+- State provider, project/account, region, services, and time window before interpreting findings.
+- Keep tenant contexts isolated. Do not mix costs, logs, services, repos, or recommendations across clients.
+- Never print secrets, access tokens, private keys, full environment dumps, or service account key contents.
+- Prefer read-only commands first.
+- Prefer explicit flags such as `--project inbound-pattern-489808-h0` over changing global CLI config.
+- For GCP, use local authenticated `gcloud`.
+- For AWS, verify `aws sts get-caller-identity` before querying resources.
+- Treat billing and cost numbers carefully: do not compare estimated, forecasted, and invoiced values without naming the basis.
+
+## Development
+
+The skill runtime has no third-party production dependencies.
+
+```bash
+cd devo/skill
+npm run check
+```
+
+Validate shell installer syntax:
+
+```bash
+bash -n install.sh
+```
+
+Validate the installed command after running `install.sh`:
+
+```bash
+command -v devo
+devo tenant letzgo
+devo doctor --tenant letzgo
+```
+
+## Current Status
+
+- Repo is private under `turinglabsorg/devo`.
+- Installed skill path: `~/.codex/skills/devo`.
+- Installed CLI wrapper: `~/.local/bin/devo`.
+- Canonical config directory: `~/.devo/`.
+- `letzgo` tenant is configured for GCP project `inbound-pattern-489808-h0`.
