@@ -8,7 +8,7 @@ Devo searches for config in this order:
 
 1. `./devo.config.json`
 2. the Devo repo root when running from the local repo
-3. `~/.config/devo/config.json`
+3. `~/.devo/config.json`
 
 Use `devo.config.example.json` as the schema example. The real `devo.config.json` is ignored by Git.
 

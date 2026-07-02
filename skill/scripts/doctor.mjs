@@ -73,7 +73,7 @@ export const COMMAND_CATALOG = {
 const DEFAULT_CONFIG_PATHS = [
   resolve(process.cwd(), "devo.config.json"),
   resolve(REPO_DIR, "devo.config.json"),
-  join(process.env.HOME || "", ".config", "devo", "config.json"),
+  join(process.env.HOME || "", ".devo", "config.json"),
 ].filter(Boolean);
 
 export function normalizeProvider(provider) {

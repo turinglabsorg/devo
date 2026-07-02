@@ -48,7 +48,7 @@ Local config lookup order:
 
 1. `./devo.config.json`
 2. `devo/devo.config.json` when running from this repo
-3. `~/.config/devo/config.json`
+3. `~/.devo/config.json`
 
 `devo.config.json` is intentionally ignored by Git. Use [devo.config.example.json](./devo.config.example.json) as the committed schema/example.
 
@@ -59,7 +59,7 @@ cd devo/skill
 ./install.sh
 ```
 
-The installer copies the CLI to `${CODEX_HOME:-$HOME/.codex}/tools/devo`, the skill resources to `${CODEX_HOME:-$HOME/.codex}/skills/devo`, and the config example to `~/.config/devo/config.example.json`.
+The installer copies the CLI to `${CODEX_HOME:-$HOME/.codex}/tools/devo`, the skill resources to `${CODEX_HOME:-$HOME/.codex}/skills/devo`, and the config example to `~/.devo/config.example.json`.
 
 It also creates a `devo` command in `~/.local/bin/devo` by default:
 

@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 TOOLS_DIR="$CODEX_HOME/tools/devo"
 SKILL_DIR="$CODEX_HOME/skills/devo"
-CONFIG_DIR="$HOME/.config/devo"
+CONFIG_DIR="$HOME/.devo"
 BIN_DIR="${DEVO_BIN_DIR:-$HOME/.local/bin}"
 
 echo "Installing Devo into $CODEX_HOME"
