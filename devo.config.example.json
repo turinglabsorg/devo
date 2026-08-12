@@ -44,6 +44,18 @@
       "labels": {
         "client": "Example"
       }
+    },
+    "example-digitalocean": {
+      "provider": "digitalocean",
+      "teamName": "Example Team",
+      "doctlContext": "example-team",
+      "defaultRegion": "fra",
+      "regions": ["fra"],
+      "digitalOceanProjectId": "00000000-0000-0000-0000-000000000000",
+      "labels": {
+        "client": "Example"
+      },
+      "notes": "Credentials stay in the named doctl context, never in this file"
     }
   }
 }

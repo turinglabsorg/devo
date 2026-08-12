@@ -1,8 +1,8 @@
 # Devo
 
-Devo is a private Turing Labs DevOps specialist for Codex. It gives Codex a consistent way to audit cloud environments, map client aliases to real cloud projects, inspect service health, compare logs, and review cost signals across GCP and AWS.
+Devo is a private Turing Labs DevOps specialist for Codex. It gives Codex a consistent way to audit cloud environments, map client aliases to real cloud projects or accounts, inspect service health, compare logs, and review cost signals across GCP, AWS, and DigitalOcean.
 
-The first implementation is a Codex skill plus a small Node.js CLI. It deliberately uses the user's existing `gcloud` and `aws` installations instead of storing cloud credentials or introducing a separate backend service.
+The implementation is a Codex skill plus a small Node.js CLI. It deliberately uses the user's existing `gcloud`, `aws`, and `doctl` installations instead of storing cloud credentials or introducing a separate backend service.
 
 ## What Devo Does
 
@@ -10,7 +10,8 @@ The first implementation is a Codex skill plus a small Node.js CLI. It deliberat
 - Resolves tenant aliases such as `letzgo` to provider, project/account, regions, repositories, and services.
 - Produces safe command suggestions for service inventory, logs, costs, IAM, and billing checks.
 - Runs read-only readiness checks through `devo doctor`.
-- Guides Codex through cloud audits with scoped references for GCP, AWS, costs, logs, and tenants.
+- Enforces explicit named `doctl` contexts for DigitalOcean tenants.
+- Guides Codex through cloud audits with scoped references for GCP, AWS, DigitalOcean, costs, logs, and tenants.
 
 Devo is read-only by default. It should not create, update, delete, restart, resize, rotate, or deploy cloud resources unless the user explicitly asks for that change.
 
@@ -46,6 +47,7 @@ devo/
     ├── references/
     │   ├── aws.md
     │   ├── costs.md
+    │   ├── digitalocean.md
     │   ├── gcp.md
     │   ├── logs.md
     │   └── tenants.md
@@ -95,6 +97,17 @@ Local development can also use:
 
 `devo.config.json` is ignored by Git. Do not commit real tenant config if it contains operational metadata that should remain local. Never store secrets, access tokens, service account keys, passwords, or cloud credentials in Devo config.
 
+DigitalOcean credentials live in persistent named `doctl` contexts. Devo stores only the context name:
+
+```json
+{
+  "provider": "digitalocean",
+  "teamName": "Example Team",
+  "doctlContext": "example-team",
+  "defaultRegion": "fra"
+}
+```
+
 Config lookup order:
 
 1. `./devo.config.json`
@@ -134,6 +147,8 @@ devo commands --tenant letzgo services
 devo commands --tenant letzgo logs
 devo commands gcp costs
 devo commands aws costs
+devo doctor --tenant example-digitalocean
+devo commands digitalocean services
 ```
 
 When working from the repo without installing:
@@ -161,6 +176,15 @@ devo commands --tenant letzgo services
 
 Then run the suggested provider commands with explicit `--project` and `--region` flags. Do not rely on global defaults for audit conclusions.
 
+### Inspect DigitalOcean Services
+
+```bash
+devo doctor --tenant example-digitalocean
+devo commands --tenant example-digitalocean services
+```
+
+Every generated resource command includes the tenant's named `doctl` context. Never rely on whichever DigitalOcean context happens to be globally active.
+
 ### Review Logs
 
 ```bash
@@ -186,6 +210,7 @@ Cost reviews should label numbers as estimated, forecasted, or historical invoic
 - Prefer explicit flags such as `--project inbound-pattern-489808-h0` over changing global CLI config.
 - For GCP, use local authenticated `gcloud`.
 - For AWS, verify `aws sts get-caller-identity` before querying resources.
+- For DigitalOcean, require a tenant-scoped `doctlContext` and pass `--context` on every account or resource command.
 - Treat billing and cost numbers carefully: do not compare estimated, forecasted, and invoiced values without naming the basis.
 
 ## Development
@@ -195,6 +220,7 @@ The skill runtime has no third-party production dependencies.
 ```bash
 cd devo/skill
 npm run check
+npm test
 ```
 
 Validate shell installer syntax:
@@ -218,3 +244,4 @@ devo doctor --tenant letzgo
 - Installed CLI wrapper: `~/.local/bin/devo`.
 - Canonical config directory: `~/.devo/`.
 - `letzgo` tenant is configured for GCP project `inbound-pattern-489808-h0`.
+- DigitalOcean tenants use isolated persistent `doctl` contexts without embedding tokens in Devo config.

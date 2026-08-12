@@ -28,10 +28,10 @@ function printHelp() {
   console.log(`Devo cloud operations helper
 
 Usage:
-  devo doctor [--provider all|gcp|aws] [--tenant name] [--config path] [--json]
+  devo doctor [--provider all|gcp|aws|digitalocean] [--tenant name] [--config path] [--json]
   devo tenants [--config path]
   devo tenant <name> [--config path] [--json]
-  devo commands [gcp|aws] [topic] [--tenant name] [--config path]
+  devo commands [gcp|aws|digitalocean] [topic] [--tenant name] [--config path]
 
 Topics:
   all, identity, services, logs, costs, iam
@@ -44,7 +44,9 @@ Examples:
   devo tenant letzgo
   devo commands --tenant letzgo services
   devo commands gcp logs
-  devo commands aws costs`);
+  devo commands aws costs
+  devo doctor --tenant example-digitalocean
+  devo commands digitalocean services`);
 }
 
 function printDoctorHuman(report) {
@@ -81,7 +83,7 @@ function printTenantsHuman(report) {
   }
 
   for (const tenant of report.tenants) {
-    const scope = tenant.projectId || tenant.accountId || "no cloud scope";
+    const scope = tenant.projectId || tenant.accountId || tenant.teamName || tenant.doctlContext || "no cloud scope";
     const region = tenant.defaultRegion || tenant.regions[0] || "no default region";
     console.log(`${tenant.name}: ${tenant.provider} ${scope} ${region}`);
   }
@@ -97,6 +99,9 @@ function printTenantHuman(resolved) {
   if (tenant.accountId) console.log(`  accountId: ${tenant.accountId}`);
   if (tenant.gcloudConfiguration) console.log(`  gcloudConfiguration: ${tenant.gcloudConfiguration}`);
   if (tenant.profile) console.log(`  profile: ${tenant.profile}`);
+  if (tenant.doctlContext) console.log(`  doctlContext: ${tenant.doctlContext}`);
+  if (tenant.teamName) console.log(`  teamName: ${tenant.teamName}`);
+  if (tenant.digitalOceanProjectId) console.log(`  digitalOceanProjectId: ${tenant.digitalOceanProjectId}`);
   if (tenant.sourceRoot) console.log(`  sourceRoot: ${tenant.sourceRoot}`);
   if (tenant.artifactRegistryRepo) console.log(`  artifactRegistryRepo: ${tenant.artifactRegistryRepo}`);
   if (tenant.defaultRegion) console.log(`  defaultRegion: ${tenant.defaultRegion}`);
@@ -153,7 +158,9 @@ async function main() {
       return previous !== "--tenant" && previous !== "--config";
     });
     const first = positional[0];
-    const provider = ["gcp", "aws", "all"].includes(first) ? normalizeProvider(first) : undefined;
+    const provider = ["gcp", "aws", "digitalocean", "do", "digital-ocean", "all"].includes(first)
+      ? normalizeProvider(first)
+      : undefined;
     const topic = provider ? positional[1] || "all" : first || "all";
     printCommandCatalog({ provider, topic, tenantName, configPath });
     return;

@@ -68,6 +68,33 @@ export const COMMAND_CATALOG = {
       "aws iam list-account-aliases --output json",
     ],
   },
+  digitalocean: {
+    identity: [
+      "doctl --context DOCTL_CONTEXT account get --output json",
+      "doctl --context DOCTL_CONTEXT account ratelimit --output json",
+      "doctl auth list",
+    ],
+    services: [
+      "doctl --context DOCTL_CONTEXT projects list --output json",
+      "doctl --context DOCTL_CONTEXT apps list --output json",
+      "doctl --context DOCTL_CONTEXT compute droplet list --output json",
+      "doctl --context DOCTL_CONTEXT databases list --output json",
+      "doctl --context DOCTL_CONTEXT kubernetes cluster list --output json",
+    ],
+    logs: [
+      "doctl --context DOCTL_CONTEXT apps list --output json",
+      "doctl --context DOCTL_CONTEXT apps logs APP_ID COMPONENT --type run --tail 100",
+    ],
+    costs: [
+      "doctl --context DOCTL_CONTEXT balance get --output json",
+      "doctl --context DOCTL_CONTEXT billing-history list --output json",
+    ],
+    iam: [
+      "doctl --context DOCTL_CONTEXT account get --output json",
+      "doctl --context DOCTL_CONTEXT compute ssh-key list --output json",
+      "doctl --context DOCTL_CONTEXT projects list --output json",
+    ],
+  },
 };
 
 const DEFAULT_CONFIG_PATHS = [
@@ -78,8 +105,13 @@ const DEFAULT_CONFIG_PATHS = [
 
 export function normalizeProvider(provider) {
   const value = String(provider || "all").toLowerCase();
-  if (["all", "gcp", "aws"].includes(value)) return value;
-  throw new Error(`Unsupported provider: ${provider}. Expected all, gcp, or aws.`);
+  const normalized = {
+    do: "digitalocean",
+    "digital-ocean": "digitalocean",
+    digital_ocean: "digitalocean",
+  }[value] || value;
+  if (["all", "gcp", "aws", "digitalocean"].includes(normalized)) return normalized;
+  throw new Error(`Unsupported provider: ${provider}. Expected all, gcp, aws, or digitalocean.`);
 }
 
 export function loadConfig(configPath) {
@@ -107,6 +139,9 @@ export function listTenants({ configPath } = {}) {
     projectId: tenant.projectId,
     accountId: tenant.accountId,
     profile: tenant.profile,
+    doctlContext: tenant.doctlContext,
+    teamName: tenant.teamName,
+    digitalOceanProjectId: tenant.digitalOceanProjectId,
     defaultRegion: tenant.defaultRegion,
     regions: tenant.regions || [],
     notes: tenant.notes || "",
@@ -130,23 +165,38 @@ export function resolveTenant(name, { configPath } = {}) {
     );
   }
 
+  const provider = normalizeProvider(tenant.provider);
+  if (provider === "digitalocean" && !tenant.doctlContext) {
+    throw new Error(`DigitalOcean tenant ${name} must define doctlContext.`);
+  }
+
+  const forbiddenCredentialFields = ["accessToken", "apiToken", "token"];
+  const forbiddenField = forbiddenCredentialFields.find((field) => tenant[field]);
+  if (forbiddenField) {
+    throw new Error(
+      `Tenant ${name} contains forbidden credential field ${forbiddenField}. Store credentials in the provider CLI, not Devo config.`,
+    );
+  }
+
   return {
     configPath: loaded.path,
     name,
     tenant: {
       ...tenant,
-      provider: normalizeProvider(tenant.provider),
+      provider,
     },
   };
 }
 
-function applyTenantTemplate(command, tenant) {
+export function applyTenantTemplate(command, tenant) {
   const region = tenant.defaultRegion || tenant.regions?.[0] || "REGION";
   const replacements = {
     PROJECT_ID: tenant.projectId || "PROJECT_ID",
     REGION: region,
     ACCOUNT_ID: tenant.accountId || "ACCOUNT_ID",
     PROFILE: tenant.profile || "PROFILE",
+    DOCTL_CONTEXT: tenant.doctlContext || "DOCTL_CONTEXT",
+    DIGITALOCEAN_PROJECT_ID: tenant.digitalOceanProjectId || "DIGITALOCEAN_PROJECT_ID",
   };
 
   let resolved = command;
@@ -292,6 +342,55 @@ function awsTenantDoctor(tenant) {
   };
 }
 
+function digitalOceanDoctor() {
+  const checks = [
+    toolCheck("doctl", ["version"]),
+    commandCheck("doctl contexts", "doctl", ["auth", "list"], "authentication contexts inspected"),
+  ];
+
+  return {
+    provider: "digitalocean",
+    ok: checks.every((check) => check.ok),
+    checks,
+  };
+}
+
+function digitalOceanTenantDoctor(tenant) {
+  const contextArgs = ["--context", tenant.doctlContext];
+  const checks = [
+    toolCheck("doctl", ["version"]),
+    commandCheck(
+      `DigitalOcean context ${tenant.doctlContext}`,
+      "doctl",
+      [...contextArgs, "account", "get", "--output", "json"],
+      "account identity inspected",
+    ),
+    commandCheck(
+      "DigitalOcean projects",
+      "doctl",
+      [...contextArgs, "projects", "list", "--output", "json"],
+      "projects inspected",
+    ),
+  ];
+
+  if (tenant.digitalOceanProjectId) {
+    checks.push(
+      commandCheck(
+        `DigitalOcean project ${tenant.digitalOceanProjectId}`,
+        "doctl",
+        [...contextArgs, "projects", "get", tenant.digitalOceanProjectId, "--output", "json"],
+        "project inspected",
+      ),
+    );
+  }
+
+  return {
+    provider: "digitalocean",
+    ok: checks.every((check) => check.ok),
+    checks,
+  };
+}
+
 export function runDoctor({ provider = "all", tenantName, configPath } = {}) {
   const resolvedTenant = tenantName ? resolveTenant(tenantName, { configPath }) : null;
   const normalizedProvider = normalizeProvider(provider || resolvedTenant?.tenant.provider);
@@ -321,12 +420,25 @@ export function runDoctor({ provider = "all", tenantName, configPath } = {}) {
     };
   }
 
+  if (resolvedTenant?.tenant.provider === "digitalocean") {
+    return {
+      generatedAt: new Date().toISOString(),
+      tenant: resolvedTenant.name,
+      configPath: resolvedTenant.configPath,
+      providers: [digitalOceanTenantDoctor(resolvedTenant.tenant)],
+    };
+  }
+
   if (normalizedProvider === "all" || normalizedProvider === "gcp") {
     providers.push(gcpDoctor());
   }
 
   if (normalizedProvider === "all" || normalizedProvider === "aws") {
     providers.push(awsDoctor());
+  }
+
+  if (normalizedProvider === "all" || normalizedProvider === "digitalocean") {
+    providers.push(digitalOceanDoctor());
   }
 
   return {
@@ -350,7 +462,7 @@ export function printCommandCatalog({ provider, topic = "all", tenantName, confi
   const resolvedTenant = tenantName ? resolveTenant(tenantName, { configPath }) : null;
   const normalizedProvider = normalizeProvider(provider || resolvedTenant?.tenant.provider);
   if (normalizedProvider === "all") {
-    throw new Error("Choose a specific provider for command suggestions: gcp or aws.");
+    throw new Error("Choose a specific provider for command suggestions: gcp, aws, or digitalocean.");
   }
 
   if (resolvedTenant && resolvedTenant.tenant.provider !== normalizedProvider) {

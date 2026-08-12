@@ -41,6 +41,14 @@ Use `devo.config.example.json` as the schema example. The real `devo.config.json
       "profile": "example",
       "regions": ["eu-west-1"],
       "defaultRegion": "eu-west-1"
+    },
+    "example-digitalocean": {
+      "provider": "digitalocean",
+      "teamName": "Example Team",
+      "doctlContext": "example-team",
+      "defaultRegion": "fra",
+      "regions": ["fra"],
+      "digitalOceanProjectId": "00000000-0000-0000-0000-000000000000"
     }
   }
 }
@@ -54,6 +62,8 @@ devo tenant letzgo
 devo doctor --tenant letzgo
 devo commands --tenant letzgo services
 devo commands --tenant letzgo logs
+devo doctor --tenant example-digitalocean
+devo commands --tenant example-digitalocean services
 ```
 
 ## Rules
@@ -62,3 +72,5 @@ devo commands --tenant letzgo logs
 - State the resolved provider, project/account, and region before querying resources.
 - Do not mix logs, costs, resource inventory, or findings across tenants.
 - Treat tenant config as operational metadata. Do not store secrets in it.
+- Require `doctlContext` for every DigitalOcean tenant and pass it explicitly to all `doctl` account and resource commands.
+- Keep DigitalOcean tokens in named `doctl` contexts, never in Devo config.

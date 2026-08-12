@@ -1,6 +1,6 @@
 {
   "name": "@turinglabs/devo-skill",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "bin": {
@@ -8,6 +8,7 @@
   },
   "scripts": {
     "check": "node --check index.js && node --check scripts/doctor.mjs",
-    "doctor": "node index.js doctor --provider all"
+    "doctor": "node index.js doctor --provider all",
+    "test": "node --test test/*.test.mjs"
   }
 }

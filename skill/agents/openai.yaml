@@ -1,4 +1,4 @@
 interface:
   display_name: "Devo"
-  short_description: "Cloud ops checks for GCP and AWS"
-  default_prompt: "Use $devo to audit cloud health, logs, costs, and service configuration across GCP and AWS."
+  short_description: "Tenant-safe cloud ops across three providers"
+  default_prompt: "Use $devo to audit cloud health, logs, costs, and service configuration across GCP, AWS, and DigitalOcean."

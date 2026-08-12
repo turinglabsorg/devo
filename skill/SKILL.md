@@ -1,11 +1,11 @@
 ---
 name: devo
-description: DevOps specialist for auditing GCP and AWS environments. Use when the user asks to verify whether gcloud or AWS are configured correctly, inspect cloud services, compare logs, review costs, check cloud health, investigate incidents, audit IAM/billing/service state, or produce a cloud operations report.
+description: DevOps specialist for auditing GCP, AWS, and DigitalOcean environments with isolated tenant contexts. Use when the user asks to verify gcloud, AWS, or doctl configuration; inspect cloud services; compare logs; review costs; check cloud health; investigate incidents; audit IAM, billing, or service state; deploy explicitly requested changes; or produce a cloud operations report.
 ---
 
 # Devo
 
-Devo is a cloud operations specialist for GCP and AWS. It helps Codex inspect cloud state, compare logs, verify costs, and explain operational risks while staying read-only by default.
+Devo is a cloud operations specialist for GCP, AWS, and DigitalOcean. It helps Codex inspect cloud state, compare logs, verify costs, and explain operational risks while staying read-only by default.
 
 ## Core Workflow
 
@@ -26,6 +26,7 @@ node devo/skill/index.js doctor --provider all
 3. Load only the reference needed for the task:
    - GCP or `gcloud`: read `references/gcp.md`.
    - AWS: read `references/aws.md`.
+   - DigitalOcean or `doctl`: read `references/digitalocean.md`.
    - Cost or billing review: read `references/costs.md`.
    - Log comparison or incident review: read `references/logs.md`.
    - Tenant/client mapping: read `references/tenants.md`.
@@ -52,6 +53,8 @@ devo commands --tenant letzgo services
 devo doctor --provider gcp --json
 devo commands gcp logs
 devo commands aws costs
+devo doctor --tenant zonzo
+devo commands digitalocean services
 ```
 
 Use `doctor` for local tool/auth/config readiness. Use `commands` to print non-destructive audit command suggestions for a provider and topic.
