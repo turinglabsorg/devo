@@ -18,14 +18,14 @@ Do not compare numbers with different cost bases without saying so.
 Start with billing account attachment:
 
 ```bash
-gcloud billing projects describe PROJECT_ID
-gcloud billing accounts list
+CLOUDSDK_CONFIG=PROFILE_ROOT gcloud --account=ACCOUNT --project=PROJECT_ID billing projects describe PROJECT_ID
+CLOUDSDK_CONFIG=PROFILE_ROOT gcloud --account=ACCOUNT billing accounts list
 ```
 
 If Cloud Billing export to BigQuery exists, query it directly:
 
 ```bash
-bq query --use_legacy_sql=false '
+CLOUDSDK_CONFIG=PROFILE_ROOT bq query --project_id=PROJECT_ID --use_legacy_sql=false '
 SELECT
   service.description AS service,
   sku.description AS sku,

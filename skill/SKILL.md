@@ -30,13 +30,14 @@ node devo/skill/index.js doctor --provider all
    - Cost or billing review: read `references/costs.md`.
    - Log comparison or incident review: read `references/logs.md`.
    - Tenant/client mapping: read `references/tenants.md`.
-4. Run provider commands with explicit project/profile/region flags.
+4. Run provider commands with explicit project/profile/region flags. For GCP, resolve the `master` or `nobrainer` identity profile from `references/gcp.md` and set its `CLOUDSDK_CONFIG` on every CLI, proxy, or local application process; never depend on the globally active gcloud configuration.
 5. Report findings as facts, evidence, risk, and next action. Include command summaries, not raw credential-like output.
 
 ## Safety Rules
 
 - Stay read-only unless the user explicitly requests a change.
 - Never print secrets, access tokens, private keys, full environment dumps, or service account key contents.
+- Never store gcloud credential databases, ADC JSON, OAuth tokens, cookies, or exported credentials in this skill, a repository, tenant metadata, or generated documentation. The skill stores only profile names, account identifiers, and paths; gcloud owns the credential files inside each isolated profile directory.
 - Confirm the active cloud identity before interpreting service state or costs.
 - Do not change global CLI defaults unless the user explicitly asks.
 - Keep tenant/client contexts isolated. Do not mix costs, logs, service state, or recommendations across tenants.

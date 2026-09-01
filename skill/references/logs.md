@@ -20,8 +20,8 @@ If the user gives a vague time such as "today", convert it to an exact date and 
 GCP:
 
 ```bash
-gcloud logging read 'severity>=ERROR' --project PROJECT_ID --freshness=24h --limit=100 --format=json
-gcloud logging read 'resource.labels.service_name="SERVICE" AND timestamp>="START_ISO" AND timestamp<="END_ISO"' --project PROJECT_ID --limit=500 --format=json
+CLOUDSDK_CONFIG=PROFILE_ROOT gcloud --account=ACCOUNT --project=PROJECT_ID logging read 'severity>=ERROR' --freshness=24h --limit=100 --format=json
+CLOUDSDK_CONFIG=PROFILE_ROOT gcloud --account=ACCOUNT --project=PROJECT_ID logging read 'resource.labels.service_name="SERVICE" AND timestamp>="START_ISO" AND timestamp<="END_ISO"' --limit=500 --format=json
 ```
 
 AWS:
