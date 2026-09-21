@@ -3,6 +3,18 @@ import { existsSync, readFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 
+import {
+  LEGACY_FIELD_NOTE,
+  LEGACY_PROFILE_FIELD,
+  PROFILE_FIELD,
+  findProfile,
+  isStaleToken,
+  listProfiles,
+  probeProfile,
+  profileEnv,
+  requireProfile,
+} from "./profiles.mjs";
+
 const DEFAULT_TIMEOUT_MS = 15000;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -139,6 +151,8 @@ export function listTenants({ configPath } = {}) {
     projectId: tenant.projectId,
     accountId: tenant.accountId,
     profile: tenant.profile,
+    gcloudProfile: tenant[PROFILE_FIELD],
+    gcloudConfiguration: tenant[LEGACY_PROFILE_FIELD],
     doctlContext: tenant.doctlContext,
     teamName: tenant.teamName,
     digitalOceanProjectId: tenant.digitalOceanProjectId,
@@ -178,14 +192,69 @@ export function resolveTenant(name, { configPath } = {}) {
     );
   }
 
+  const warnings = [];
+  const gcloudProfile = tenant[PROFILE_FIELD];
+  if (provider === "gcp" && gcloudProfile && !findProfile(gcloudProfile)) {
+    throw new Error(
+      `Tenant ${name} declares unknown ${PROFILE_FIELD} "${gcloudProfile}". Known profiles: ${listProfiles()
+        .map((candidate) => candidate.name)
+        .join(", ")}.`,
+    );
+  }
+
+  if (provider === "gcp" && !gcloudProfile && tenant[LEGACY_PROFILE_FIELD]) {
+    warnings.push(
+      `Tenant ${name} uses ${LEGACY_PROFILE_FIELD} "${tenant[LEGACY_PROFILE_FIELD]}": ${LEGACY_FIELD_NOTE}, so gcloud will run with whatever identity the shared global config holds. Set "${PROFILE_FIELD}" instead.`,
+    );
+  }
+
   return {
     configPath: loaded.path,
     name,
+    warnings,
     tenant: {
       ...tenant,
       provider,
     },
   };
+}
+
+/**
+ * A suggested gcloud command is only useful if it carries its identity: printed
+ * bare, it runs against the shared global config with whatever account happens
+ * to be active there.
+ */
+function applyGcloudIdentity(command, tenant) {
+  const profileName = tenant[PROFILE_FIELD];
+
+  if (profileName) {
+    const profile = findProfile(profileName);
+    if (!profile) {
+      return `${command}  # unknown ${PROFILE_FIELD} "${profileName}"`;
+    }
+
+    const isGcloud = command.startsWith("gcloud ");
+    const subcommand = isGcloud ? command.split(/\s+/)[1] : "";
+    // `auth` and `config` are the calls that inspect the identity itself, and
+    // bq spells its project flag differently, so neither gets the pinned flags.
+    const pinnable = isGcloud && subcommand !== "auth" && subcommand !== "config";
+    const flags = pinnable
+      ? [
+          profile.account && !command.includes("--account") ? `--account ${profile.account}` : "",
+          tenant.projectId && !command.includes("--project") ? `--project ${tenant.projectId}` : "",
+        ].filter(Boolean)
+      : [];
+
+    const suffix = !isGcloud && tenant.projectId ? `  # needs --project_id=${tenant.projectId}` : "";
+    return `CLOUDSDK_CONFIG=${profile.root} ${command}${flags.length ? ` ${flags.join(" ")}` : ""}${suffix}`;
+  }
+
+  const configuration = tenant[LEGACY_PROFILE_FIELD];
+  if (configuration) {
+    return `${command} --configuration ${configuration}  # ${LEGACY_FIELD_NOTE}`;
+  }
+
+  return `${command}  # no ${PROFILE_FIELD} declared: this would use the shared global config`;
 }
 
 export function applyTenantTemplate(command, tenant) {
@@ -204,6 +273,11 @@ export function applyTenantTemplate(command, tenant) {
     resolved = resolved.replaceAll(token, value);
   }
 
+  // `bq` reads the same credentials as gcloud, so it needs the same root.
+  if (tenant.provider === "gcp" && /^(gcloud|bq) /.test(resolved)) {
+    resolved = applyGcloudIdentity(resolved, tenant);
+  }
+
   if (tenant.provider === "aws" && tenant.profile && !resolved.includes("--profile ")) {
     resolved = `${resolved} --profile ${tenant.profile}`;
   }
@@ -216,6 +290,7 @@ function run(command, args, options = {}) {
     encoding: "utf8",
     timeout: options.timeout || DEFAULT_TIMEOUT_MS,
     maxBuffer: 1024 * 1024,
+    env: options.env || process.env,
   });
 
   const stdout = (result.stdout || "").trim();
@@ -227,8 +302,14 @@ function run(command, args, options = {}) {
     status: result.status,
     stdout,
     stderr,
+    missing: result.error?.code === "ENOENT",
     error: result.error?.code || result.error?.message || "",
   };
+}
+
+/** A tool that is not installed, or a probe with no target, is not a failure. */
+function allOk(checks) {
+  return checks.every((check) => check.ok || check.skipped);
 }
 
 function summarizeJson(stdout, fallback) {
@@ -244,6 +325,14 @@ function summarizeJson(stdout, fallback) {
 
 function toolCheck(tool, args) {
   const result = run(tool, args);
+  if (result.missing) {
+    return {
+      name: `${tool} available`,
+      ok: false,
+      skipped: true,
+      summary: "not installed on this workstation: provider checks skipped",
+    };
+  }
   return {
     name: `${tool} available`,
     ok: result.ok,
@@ -253,8 +342,8 @@ function toolCheck(tool, args) {
   };
 }
 
-function commandCheck(name, command, args, summaryFallback) {
-  const result = run(command, args);
+function commandCheck(name, command, args, summaryFallback, options = {}) {
+  const result = run(command, args, options);
   return {
     name,
     ok: result.ok,
@@ -264,51 +353,172 @@ function commandCheck(name, command, args, summaryFallback) {
   };
 }
 
-function gcpDoctor() {
-  const checks = [
+function gcloudToolChecks() {
+  return [
     toolCheck("gcloud", ["--version"]),
     commandCheck(
-      "active gcloud account",
+      "shared global config: active account",
       "gcloud",
       ["auth", "list", "--filter=status:ACTIVE", "--format=json"],
       "active account inspected",
     ),
     commandCheck(
-      "gcloud config",
+      "shared global config: settings",
       "gcloud",
       ["config", "list", "--format=json"],
       "config inspected",
     ),
   ];
+}
+
+/**
+ * Every isolated profile is probed with a read-only API call. `auth list`
+ * answers from the local store and stays green on a dead refresh token, so it
+ * cannot be the check that catches a broken profile: that is exactly how the
+ * doctor reported "ok" while a profile could not authenticate.
+ */
+function profileChecks() {
+  return listProfiles().map((profile) => {
+    if (!profile.rootExists) {
+      return {
+        name: `profile ${profile.name}`,
+        ok: false,
+        summary: "no configuration root",
+        error: `missing ${profile.root}. Create it with: CLOUDSDK_CONFIG=${profile.root} gcloud auth login ${profile.account || "<account>"}`,
+      };
+    }
+
+    const probe = probeProfile(profile);
+    return {
+      name: `profile ${profile.name}${profile.account ? ` (${profile.account})` : ""}`,
+      ok: probe.ok === true,
+      skipped: probe.ok === null,
+      summary: probe.summary || "",
+      warning: probe.stale ? `repair with: ${probe.repair}` : "",
+      error: probe.ok === false ? probe.error || "" : "",
+    };
+  });
+}
+
+function gcpDoctor() {
+  const checks = [...gcloudToolChecks(), ...profileChecks()];
 
   return {
     provider: "gcp",
-    ok: checks.every((check) => check.ok),
+    ok: allOk(checks),
     checks,
   };
 }
 
+/**
+ * Which root and identity a tenant's gcloud calls must use.
+ *
+ * `gcloudProfile` selects an isolated root; the legacy `gcloudConfiguration`
+ * selects a named configuration inside the shared root. Those are different
+ * things: treating the legacy value as a profile silently checks the tenant's
+ * project with whatever identity the global config happens to hold.
+ */
+function tenantGcloudContext(tenant) {
+  const projectFlags = tenant.projectId ? ["--project", tenant.projectId] : [];
+  const profileName = tenant[PROFILE_FIELD];
+
+  if (profileName) {
+    try {
+      const profile = requireProfile(profileName);
+      return {
+        env: profileEnv(profile),
+        flags: ["--account", profile.account, ...projectFlags],
+        label: `profile ${profile.name}`,
+        error: "",
+      };
+    } catch (error) {
+      return {
+        env: process.env,
+        flags: projectFlags,
+        label: `profile ${profileName}`,
+        error: error.message,
+      };
+    }
+  }
+
+  const configuration = tenant[LEGACY_PROFILE_FIELD];
+  if (configuration) {
+    return {
+      env: process.env,
+      flags: ["--configuration", configuration, ...projectFlags],
+      label: `legacy named configuration ${configuration}`,
+      note: LEGACY_FIELD_NOTE,
+      error: "",
+    };
+  }
+
+  return { env: process.env, flags: projectFlags, label: "shared global config", error: "" };
+}
+
 function gcpTenantDoctor(tenant) {
-  const checks = [
-    ...gcpDoctor().checks,
-    commandCheck(
-      `gcp project ${tenant.projectId || "configured"}`,
-      "gcloud",
-      ["projects", "describe", tenant.projectId || "", "--format=json"].filter(Boolean),
-      "project inspected",
-    ),
-  ];
+  const context = tenantGcloudContext(tenant);
+  const profileName = tenant[PROFILE_FIELD];
+
+  const projectCheck = context.error
+    ? {
+        name: `gcloud ${context.label}`,
+        ok: false,
+        summary: "tenant identity unusable",
+        error: context.error,
+      }
+    : commandCheck(
+        `gcp project ${tenant.projectId || "configured"} via ${context.label}`,
+        "gcloud",
+        [...context.flags, "projects", "describe", tenant.projectId || "", "--format=json"].filter(Boolean),
+        "project inspected",
+        { env: context.env },
+      );
+
+  // Raw gcloud token text reads like a permission error; it is not one.
+  if (!projectCheck.ok && !context.error && isStaleToken(projectCheck.error)) {
+    projectCheck.summary = "stale credentials";
+    projectCheck.error = profileName
+      ? `the stored refresh token for this tenant's identity is no longer accepted by Google. Repair with: devo auth repair ${profileName}`
+      : "the stored refresh token for this tenant's identity is no longer accepted by Google.";
+  }
+
+  const checks = [...gcloudToolChecks(), projectCheck];
+
+  // A tenant may restate the root path. If it disagrees with the registry, the
+  // registry wins: say so rather than silently picking one of the two.
+  const restatedRoot = tenant.gcloudConfigRoot;
+  if (profileName && restatedRoot) {
+    const profile = findProfile(profileName);
+    if (profile?.root && resolve(restatedRoot) !== resolve(profile.root)) {
+      checks.push({
+        name: "tenant gcloudConfigRoot matches the profile registry",
+        ok: true,
+        warning: `tenant declares ${restatedRoot} but profile ${profileName} resolves to ${profile.root}; the registry wins.`,
+      });
+    }
+  }
+
+  if (context.note && !context.error) {
+    checks.push({
+      name: `tenant field ${LEGACY_PROFILE_FIELD} is legacy`,
+      ok: true,
+      warning: `${LEGACY_PROFILE_FIELD}: ${context.note}; prefer "${PROFILE_FIELD}".`,
+    });
+  }
 
   return {
     provider: "gcp",
-    ok: checks.every((check) => check.ok),
+    ok: allOk(checks),
     checks,
   };
 }
 
 function awsDoctor() {
+  const tool = toolCheck("aws", ["--version"]);
+  if (tool.skipped) return { provider: "aws", ok: true, checks: [tool] };
+
   const checks = [
-    toolCheck("aws", ["--version"]),
+    tool,
     commandCheck(
       "aws caller identity",
       "aws",
@@ -320,45 +530,54 @@ function awsDoctor() {
 
   return {
     provider: "aws",
-    ok: checks.every((check) => check.ok),
+    ok: allOk(checks),
     checks,
   };
 }
 
 function awsTenantDoctor(tenant) {
+  const tool = toolCheck("aws", ["--version"]);
+  if (tool.skipped) return { provider: "aws", ok: true, checks: [tool] };
+
   const identityArgs = ["sts", "get-caller-identity", "--output", "json"];
   if (tenant.profile) identityArgs.push("--profile", tenant.profile);
 
   const checks = [
-    toolCheck("aws", ["--version"]),
+    tool,
     commandCheck("aws caller identity", "aws", identityArgs, "caller identity inspected"),
     commandCheck("aws configure list", "aws", ["configure", "list"], "configuration inspected"),
   ];
 
   return {
     provider: "aws",
-    ok: checks.every((check) => check.ok),
+    ok: allOk(checks),
     checks,
   };
 }
 
 function digitalOceanDoctor() {
+  const tool = toolCheck("doctl", ["version"]);
+  if (tool.skipped) return { provider: "digitalocean", ok: true, checks: [tool] };
+
   const checks = [
-    toolCheck("doctl", ["version"]),
+    tool,
     commandCheck("doctl contexts", "doctl", ["auth", "list"], "authentication contexts inspected"),
   ];
 
   return {
     provider: "digitalocean",
-    ok: checks.every((check) => check.ok),
+    ok: allOk(checks),
     checks,
   };
 }
 
 function digitalOceanTenantDoctor(tenant) {
+  const tool = toolCheck("doctl", ["version"]);
+  if (tool.skipped) return { provider: "digitalocean", ok: true, checks: [tool] };
+
   const contextArgs = ["--context", tenant.doctlContext];
   const checks = [
-    toolCheck("doctl", ["version"]),
+    tool,
     commandCheck(
       `DigitalOcean context ${tenant.doctlContext}`,
       "doctl",
@@ -386,7 +605,7 @@ function digitalOceanTenantDoctor(tenant) {
 
   return {
     provider: "digitalocean",
-    ok: checks.every((check) => check.ok),
+    ok: allOk(checks),
     checks,
   };
 }
@@ -407,6 +626,7 @@ export function runDoctor({ provider = "all", tenantName, configPath } = {}) {
       generatedAt: new Date().toISOString(),
       tenant: resolvedTenant.name,
       configPath: resolvedTenant.configPath,
+      warnings: resolvedTenant.warnings,
       providers: [gcpTenantDoctor(resolvedTenant.tenant)],
     };
   }
@@ -416,6 +636,7 @@ export function runDoctor({ provider = "all", tenantName, configPath } = {}) {
       generatedAt: new Date().toISOString(),
       tenant: resolvedTenant.name,
       configPath: resolvedTenant.configPath,
+      warnings: resolvedTenant.warnings,
       providers: [awsTenantDoctor(resolvedTenant.tenant)],
     };
   }
@@ -425,6 +646,7 @@ export function runDoctor({ provider = "all", tenantName, configPath } = {}) {
       generatedAt: new Date().toISOString(),
       tenant: resolvedTenant.name,
       configPath: resolvedTenant.configPath,
+      warnings: resolvedTenant.warnings,
       providers: [digitalOceanTenantDoctor(resolvedTenant.tenant)],
     };
   }
@@ -476,6 +698,12 @@ export function printCommandCatalog({ provider, topic = "all", tenantName, confi
     console.log(
       `Tenant: ${resolvedTenant.name}${resolvedTenant.tenant.projectId ? ` project=${resolvedTenant.tenant.projectId}` : ""}${resolvedTenant.tenant.accountId ? ` account=${resolvedTenant.tenant.accountId}` : ""}`,
     );
+    if (normalizedProvider === "gcp") {
+      console.log(`Identity: ${tenantGcloudContext(resolvedTenant.tenant).label}`);
+    }
+    for (const warning of resolvedTenant.warnings || []) {
+      console.log(`Warning: ${warning}`);
+    }
   }
   console.log("");
 

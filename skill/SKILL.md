@@ -30,14 +30,40 @@ node devo/skill/index.js doctor --provider all
    - Cost or billing review: read `references/costs.md`.
    - Log comparison or incident review: read `references/logs.md`.
    - Tenant/client mapping: read `references/tenants.md`.
-4. Run provider commands with explicit project/profile/region flags. For GCP, resolve the `master` or `nobrainer` identity profile from `references/gcp.md` and set its `CLOUDSDK_CONFIG` on every CLI, proxy, or local application process; never depend on the globally active gcloud configuration.
+4. Run provider commands with explicit project/profile/region flags. For GCP, resolve the identity profile from `references/gcp.md` and route every call through `devo gcloud`, which pins `CLOUDSDK_CONFIG`, `--account`, and `--project`; never depend on the globally active gcloud configuration.
 5. Report findings as facts, evidence, risk, and next action. Include command summaries, not raw credential-like output.
+
+## Identity Profiles
+
+A GCP call without its profile root does not fail: it silently uses the shared
+global config and whatever account is active there. That produces wrong-identity
+errors that read like permission problems, so every gcloud call must be routed:
+
+```bash
+devo profiles                      # which profiles exist, where, and with which account
+devo profiles --probe              # the same, plus a read-only live token check
+devo gcloud --profile credilex --project credilex-gprod -- run services list --region europe-west8
+devo auth status                   # one line per profile; non-zero exit if one is dead
+devo auth status --quiet --notify  # silent unless a profile is dead, then a desktop notice
+devo auth repair credilex          # the only sanctioned credential repair
+```
+
+`auth status` is a detector, not a keep-alive: a refresh token is not expired by
+short inactivity, so polling cannot stop it from dying. It buys early warning.
+
+`devo gcloud` refuses to run without `--profile`, refuses a project that belongs
+to another profile's scope, refuses a mutating `auth`/`config` subcommand unless
+`--allow-mutation` is passed, and rewrites a dead refresh token into the exact
+repair command. `devo doctor` probes each profile with a real API call, because
+`gcloud auth list` answers from the local store and stays green on a dead token;
+it exits non-zero when any check fails.
 
 ## Safety Rules
 
 - Stay read-only unless the user explicitly requests a change.
 - Never print secrets, access tokens, private keys, full environment dumps, or service account key contents.
 - Never store gcloud credential databases, ADC JSON, OAuth tokens, cookies, or exported credentials in this skill, a repository, tenant metadata, or generated documentation. The skill stores only profile names, account identifiers, and paths; gcloud owns the credential files inside each isolated profile directory.
+- Never run a bare `gcloud auth login` and never pass `--update-adc`: both write into the identity root that happens to be ambient. Use `devo auth repair <profile>`.
 - Confirm the active cloud identity before interpreting service state or costs.
 - Do not change global CLI defaults unless the user explicitly asks.
 - Keep tenant/client contexts isolated. Do not mix costs, logs, service state, or recommendations across tenants.
@@ -56,6 +82,15 @@ devo commands gcp logs
 devo commands aws costs
 devo doctor --tenant zonzo
 devo commands digitalocean services
+devo profiles
+devo profiles --probe
+devo gcloud --profile credilex --project credilex-gprod -- projects describe credilex-gprod
+devo auth status
+devo auth repair credilex
 ```
 
-Use `doctor` for local tool/auth/config readiness. Use `commands` to print non-destructive audit command suggestions for a provider and topic.
+Use `doctor` for local tool/auth/config readiness; it exits non-zero when a check
+fails. Use `profiles` for the identity inventory. Use `gcloud` to run a gcloud
+command inside one profile root. Use `commands` to print non-destructive audit
+command suggestions for a provider and topic, already prefixed with the tenant's
+profile root.

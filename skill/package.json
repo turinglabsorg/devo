@@ -7,7 +7,7 @@
     "devo": "./index.js"
   },
   "scripts": {
-    "check": "node --check index.js && node --check scripts/doctor.mjs",
+    "check": "node --check index.js && for f in scripts/*.mjs; do node --check \"$f\" || exit 1; done && sh -n hooks/gcloud-guard.sh",
     "doctor": "node index.js doctor --provider all",
     "test": "node --test test/*.test.mjs"
   }

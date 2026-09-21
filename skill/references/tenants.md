@@ -35,6 +35,22 @@ Use `devo.config.example.json` as the schema example. The real `devo.config.json
       },
       "notes": "LETZGO on Google Cloud"
     },
+    "credilex": {
+      "provider": "gcp",
+      "projectName": "Credilex Staging",
+      "projectId": "credilex-gstaging",
+      "projectNumber": "790098789544",
+      "gcloudProfile": "credilex",
+      "sourceRoot": "/Users/zencrust/GIT/@tessor/credilex-datatape-stage-release",
+      "regions": ["europe-west4"],
+      "defaultRegion": "europe-west4",
+      "artifactRegistryRepo": "credilex",
+      "services": ["credilex-api"],
+      "labels": {
+        "client": "CREDILEX"
+      },
+      "notes": "Isolated profile credilex / seba@credilex.it. Do not use master/nobrainer."
+    },
     "example-aws": {
       "provider": "aws",
       "accountId": "123456789012",
@@ -74,3 +90,6 @@ devo commands --tenant example-digitalocean services
 - Treat tenant config as operational metadata. Do not store secrets in it.
 - Require `doctlContext` for every DigitalOcean tenant and pass it explicitly to all `doctl` account and resource commands.
 - Keep DigitalOcean tokens in named `doctl` contexts, never in Devo config.
+- For GCP tenants, declare `gcloudProfile`: the name of the isolated identity root. `devo` derives `CLOUDSDK_CONFIG`, the account, and the project guard from the profile registry, and prefixes the suggested commands in `devo commands` with that root. Do not use a different identity profile for a tenant.
+- `gcloudConfiguration` is legacy: it names a configuration inside the shared global root, not an isolated identity root. A tenant that still uses it runs gcloud with whatever identity the shared config holds; `devo` warns about it. Prefer `gcloudProfile`.
+- `gcloudConfigRoot` may restate the profile's root path. The registry stays the source of truth: if the restated path disagrees, `devo doctor` reports the mismatch instead of silently using one of the two.
