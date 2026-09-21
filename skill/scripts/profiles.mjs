@@ -197,23 +197,31 @@ function gcloudIn(profile, args) {
  * Asking gcloud costs a full process start -- about as much as the call being
  * guarded -- and the answer sits in a plain INI file. The guard is a drift
  * detector, not an authentication check, so an absent value is not a failure.
+ *
+ * Takes a root rather than a profile, because the ambient shared root has to be
+ * read the same way: purging an identity out of it is only safe once we know
+ * which account that root authenticates as.
  */
-export function selectedAccountOf(profile) {
+export function accountInRoot(root) {
   let configuration = "default";
   try {
-    configuration = readFileSync(join(profile.root, "active_config"), "utf8").trim() || "default";
+    configuration = readFileSync(join(root, "active_config"), "utf8").trim() || "default";
   } catch {
     // No active_config file: the default configuration is the one in use.
   }
 
   try {
-    const text = readFileSync(join(profile.root, "configurations", `config_${configuration}`), "utf8");
+    const text = readFileSync(join(root, "configurations", `config_${configuration}`), "utf8");
     const core = text.split(/^\[/m).find((chunk) => chunk.startsWith("core]")) || text;
     const match = core.match(/^\s*account\s*=\s*(.+)$/m);
     return { ok: true, configuration, account: match ? match[1].trim() : "" };
   } catch {
     return { ok: false, configuration, account: "" };
   }
+}
+
+export function selectedAccountOf(profile) {
+  return accountInRoot(profile.root);
 }
 
 const STALE_TOKEN = /Reauthentication failed|Please run:\s*\n?\s*\$? ?gcloud auth login/i;

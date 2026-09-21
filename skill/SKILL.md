@@ -43,6 +43,7 @@ errors that read like permission problems, so every gcloud call must be routed:
 devo profiles                      # which profiles exist, where, and with which account
 devo profiles --probe              # the same, plus a read-only live token check
 devo gcloud --profile credilex --project credilex-gprod -- run services list --region europe-west8
+devo exec --profile master -- docker push REGISTRY/IMAGE:TAG
 devo auth status                   # one line per profile; non-zero exit if one is dead
 devo auth status --quiet --notify  # silent unless a profile is dead, then a desktop notice
 devo auth repair credilex          # the only sanctioned credential repair
@@ -57,6 +58,14 @@ to another profile's scope, refuses a mutating `auth`/`config` subcommand unless
 repair command. `devo doctor` probes each profile with a real API call, because
 `gcloud auth list` answers from the local store and stays green on a dead token;
 it exits non-zero when any check fails.
+
+A process that is not gcloud -- the docker CLI and the credential helper it
+spawns, terraform, an ADC client library -- needs the same root and has no gcloud
+flags to carry it. `devo exec` pins the root for the command it starts, so the
+caller names a profile instead of a directory, and refuses to pass on any
+argument that names a root or a credential store. `devo doctor --provider
+install` reports installed copies that no longer match the digests
+`skill/install.sh` recorded, which is how a copy edited in place is found.
 
 ## Safety Rules
 

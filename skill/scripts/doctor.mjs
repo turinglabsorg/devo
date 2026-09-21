@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 
+import { installChecks } from "./drift.mjs";
 import {
   LEGACY_FIELD_NOTE,
   LEGACY_PROFILE_FIELD,
@@ -122,8 +123,8 @@ export function normalizeProvider(provider) {
     "digital-ocean": "digitalocean",
     digital_ocean: "digitalocean",
   }[value] || value;
-  if (["all", "gcp", "aws", "digitalocean"].includes(normalized)) return normalized;
-  throw new Error(`Unsupported provider: ${provider}. Expected all, gcp, aws, or digitalocean.`);
+  if (["all", "gcp", "aws", "digitalocean", "install"].includes(normalized)) return normalized;
+  throw new Error(`Unsupported provider: ${provider}. Expected all, gcp, aws, digitalocean, or install.`);
 }
 
 export function loadConfig(configPath) {
@@ -610,6 +611,21 @@ function digitalOceanTenantDoctor(tenant) {
   };
 }
 
+/**
+ * Not a cloud provider: the copies on this workstation. It rides in the doctor
+ * because that is the command a reader runs when something is off, and a guard
+ * or a CLI that no longer matches its source is exactly that -- invisible
+ * otherwise, and only found by whoever goes looking.
+ */
+function installDoctor() {
+  const checks = installChecks();
+  return {
+    provider: "install",
+    ok: allOk(checks),
+    checks,
+  };
+}
+
 export function runDoctor({ provider = "all", tenantName, configPath } = {}) {
   const resolvedTenant = tenantName ? resolveTenant(tenantName, { configPath }) : null;
   const normalizedProvider = normalizeProvider(provider || resolvedTenant?.tenant.provider);
@@ -661,6 +677,10 @@ export function runDoctor({ provider = "all", tenantName, configPath } = {}) {
 
   if (normalizedProvider === "all" || normalizedProvider === "digitalocean") {
     providers.push(digitalOceanDoctor());
+  }
+
+  if (normalizedProvider === "all" || normalizedProvider === "install") {
+    providers.push(installDoctor());
   }
 
   return {

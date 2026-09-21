@@ -68,14 +68,23 @@ devo gcloud --profile credilex -- run services describe credilex-api --region eu
 - A dead refresh token is rewritten into the exact repair command instead of the
   raw gcloud text.
 - `--tty` hands the terminal to gcloud, for commands that prompt.
+- `devo exec --profile <name> [--project <id>] -- <command...>` pins the same root
+  for a process that is not gcloud: the docker CLI and the credential helper it
+  spawns, terraform, an ADC client library. It refuses any argument that names a
+  root or a credential store, so the route cannot hand one over, and it refuses a
+  `gcloud` mutation unless `--allow-mutation` is passed, so prefixing a call with
+  `devo exec` is not a way around the router's guard.
 
 A PreToolUse hook (`~/.claude/hooks/gcloud-guard.sh`) denies an unprefixed
 `gcloud auth login`, `gcloud config configurations activate`, `--update-adc`,
-and any read of a credential store, for the agent's Bash calls.
+any read of a credential store, and any mount or copy of an identity root. A
+`CLOUDSDK_CONFIG=<root>` assignment that opens a command word is read as the
+environment pin it is, so a prefixed local call passes it; a root named as an
+argument does not.
 
-Prefer `devo gcloud` for audit commands. Use the raw `CLOUDSDK_CONFIG` form below
-when a non-gcloud process needs the same root (proxy, Terraform, scripts) or when
-explaining the prefix to the user.
+Prefer `devo exec` when a non-gcloud process needs the same root, and `devo
+gcloud` for audit commands. The raw `CLOUDSDK_CONFIG` form below is for
+bootstrapping a root and for explaining the prefix to the user.
 
 ### Bootstrap Or Repair
 
