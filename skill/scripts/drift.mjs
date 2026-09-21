@@ -1,7 +1,7 @@
 import { spawnSync } from "child_process";
 import { createHash } from "crypto";
 import { existsSync, readFileSync, statSync } from "fs";
-import { join } from "path";
+import { isAbsolute, join } from "path";
 
 /**
  * The copies install.sh wrote, and whether they are still the copies it wrote.
@@ -28,13 +28,20 @@ export function manifestPath() {
   return process.env.DEVO_INSTALL_MANIFEST || join(codexHome(), "tools", "devo", "INSTALLED.json");
 }
 
-const TARGETS = {
-  runtime: "runtime copies (tools/devo)",
-  skill: "skill copies (skills/devo)",
-  hook: "hook copy (claude/hooks)",
-  wrapper: "CLI wrapper (bin/devo)",
-  config: "configuration example (~/.devo)",
-};
+const TARGETS = new Map([
+  ["runtime", "runtime copies (tools/devo)"],
+  ["skill", "skill copies (skills/devo)"],
+  ["hook", "hook copy (claude/hooks)"],
+  ["wrapper", "CLI wrapper (bin/devo)"],
+  ["config", "configuration example (~/.devo)"],
+]);
+
+/** A target label, by name and never through the prototype: a manifest is a file
+ *  someone can write, and a target called `constructor` would otherwise answer
+ *  with a function instead of a label. */
+function labelFor(target) {
+  return TARGETS.get(target) || `copies recorded as "${target}"`;
+}
 
 /**
  * The copies an install writes, whether or not a manifest records them. Read
@@ -42,6 +49,11 @@ const TARGETS = {
  * otherwise mean: the manifest is the one file that can be deleted to make this
  * check disappear, and a deletion is a commoner accident than an edit. What an
  * install leaves behind is the evidence that one is there.
+ *
+ * All five kinds, not the three trees: an install also writes the CLI wrapper and
+ * the configuration example, and leaving them out meant a machine whose wrapper
+ * was still in place could be reported as having nothing installed -- the state a
+ * deleted manifest is supposed to be caught in.
  */
 function installedCopies() {
   const home = process.env.HOME || "";
@@ -49,11 +61,20 @@ function installedCopies() {
     join(codexHome(), "tools", "devo"),
     join(codexHome(), "skills", "devo"),
     join(process.env.DEVO_HOOK_DIR || join(home, ".claude", "hooks"), "gcloud-guard.sh"),
+    join(process.env.DEVO_BIN_DIR || join(home, ".local", "bin"), "devo"),
+    join(home, ".devo", "config.example.json"),
   ];
 }
 
+/** The digest of a file, or null when it cannot be read. A copy that exists and
+ *  cannot be read is a copy that was not compared, and the caller reports it as
+ *  one instead of the check dying with the error. */
 function digest(path) {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
+  try {
+    return createHash("sha256").update(readFileSync(path)).digest("hex");
+  } catch {
+    return null;
+  }
 }
 
 /** A manifest entry that points at anything other than a file is not comparable. */
@@ -68,6 +89,12 @@ function isFile(path) {
 export function readManifest() {
   const path = manifestPath();
   if (!existsSync(path)) return null;
+  // A pipe or a device at this path would block the read for as long as nothing
+  // writes to it, which is a check that never returns instead of one that says
+  // what it found.
+  if (!isFile(path)) {
+    return { path, unreadable: "not a regular file" };
+  }
   try {
     return { path, ...JSON.parse(readFileSync(path, "utf8")) };
   } catch (error) {
@@ -76,7 +103,10 @@ export function readManifest() {
 }
 
 function repoHead(repo) {
-  if (!repo || !existsSync(join(repo, ".git"))) return null;
+  // The manifest is a file someone can write, and `join` throws on anything that
+  // is not a string -- a header field of the wrong type would take the whole check
+  // down with it instead of being reported as the manifest defect it is.
+  if (typeof repo !== "string" || !repo || !existsSync(join(repo, ".git"))) return null;
   const result = spawnSync("git", ["-C", repo, "rev-parse", "--short", "HEAD"], { encoding: "utf8" });
   return result.status === 0 ? result.stdout.trim() : null;
 }
@@ -124,8 +154,8 @@ function artifactGroups(manifest) {
 function copyChecks(manifest, parsed) {
   const checks = [];
 
-  for (const target of [...new Set([...Object.keys(TARGETS), ...parsed.groups.keys()])]) {
-    const label = TARGETS[target] || `copies recorded as "${target}"`;
+  for (const target of [...new Set([...TARGETS.keys(), ...parsed.groups.keys()])]) {
+    const label = labelFor(target);
     const entries = parsed.groups.get(target) || [];
 
     if (entries.length === 0) {
@@ -145,14 +175,31 @@ function copyChecks(manifest, parsed) {
     const diverged = [];
     const pending = [];
     const missing = [];
+    const unreadable = [];
+    const relative = [];
 
     for (const artifact of entries) {
+      // A path recorded relative to nothing is not a path this check can resolve:
+      // the doctor runs in whatever directory it was started from, so the same
+      // entry names a different file in each one. Reported instead of resolved,
+      // because resolving it is how an edited copy reads as untouched.
+      if (!isAbsolute(artifact.installed)) {
+        relative.push(artifact.installed);
+        continue;
+      }
+
       if (!isFile(artifact.installed)) {
         missing.push(artifact.installed);
         continue;
       }
 
-      if (digest(artifact.installed) !== artifact.sha256) {
+      const installed = digest(artifact.installed);
+      if (installed === null) {
+        unreadable.push(artifact.installed);
+        continue;
+      }
+
+      if (installed !== artifact.sha256) {
         diverged.push(artifact.installed);
         continue;
       }
@@ -161,19 +208,20 @@ function copyChecks(manifest, parsed) {
       // is the repository being ahead of the install: a pending reinstall, not a
       // defect. It happens on every uninstalled edit, which is why it is a
       // warning rather than a failure.
-      const source = join(manifest.repo || "", artifact.source);
-      if (manifest.repo && isFile(source) && digest(source) !== artifact.sha256) {
+      const source = isAbsolute(manifest.repo || "") ? join(manifest.repo, artifact.source) : "";
+      if (source && isFile(source) && digest(source) !== artifact.sha256) {
         pending.push(artifact.source);
       }
     }
 
-    const ok = diverged.length === 0 && missing.length === 0;
+    const differing = diverged.length + missing.length + unreadable.length + relative.length;
+    const ok = differing === 0;
     checks.push({
       name: label,
       ok,
       summary: ok
         ? `${entries.length} file${entries.length === 1 ? " matches" : "s match"} the manifest`
-        : `${diverged.length + missing.length} of ${entries.length} differ from the manifest`,
+        : `${differing} of ${entries.length} differ from the manifest`,
       warning: pending.length
         ? `the repository copy is newer for ${pending.length} file(s): reinstall with skill/install.sh`
         : "",
@@ -182,6 +230,11 @@ function copyChecks(manifest, parsed) {
         : [
             ...diverged.map((path) => `${path} was changed after it was installed`),
             ...missing.map((path) => `${path} is missing`),
+            ...unreadable.map((path) => `${path} is there but could not be read, so it was not compared`),
+            ...relative.map(
+              (path) =>
+                `${path} is recorded as a relative path, which names a different file in every directory: reinstall`,
+            ),
             `edit the repository copy and reinstall: an installed copy is never the source`,
           ].join("\n       "),
     });
@@ -254,6 +307,24 @@ export function installChecks() {
         ok: false,
         summary: "the manifest does not say what was installed",
         error: `${manifest.path}: ${parsed.error}`,
+      },
+    ];
+  }
+
+  // The header fields are read as the strings they are meant to be. A field of
+  // another type is not a value to print: it would be summarised as whatever
+  // JavaScript makes of it, and this line is the one that says when and from
+  // where the install happened.
+  const malformed = ["installedAt", "repo", "repoCommit"].filter(
+    (field) => manifest[field] !== undefined && typeof manifest[field] !== "string",
+  );
+  if (malformed.length > 0) {
+    return [
+      {
+        name: "install manifest",
+        ok: false,
+        summary: "the manifest header is not what it says it is",
+        error: `${manifest.path}: ${malformed.map((field) => `${field} is not a string`).join(", ")}`,
       },
     ];
   }

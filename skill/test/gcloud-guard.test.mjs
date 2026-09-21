@@ -139,14 +139,73 @@ test("judges a copying tool by the program it names, not by its spelling", async
 
 // A root spelled without any of the letters of its path is still a root, and the
 // variable the identity rules name one with is matched as the root it names -- so
-// a relocated profile root reaches the transfer test through it. A path that is
-// not identity material is not made one by being named at all: only the variable
-// names a root here.
+// a relocated profile root reaches the transfer test through it.
 test("judges a root named by the variable rather than by its path", async (t) => {
   const cases = [
     { expected: 2, command: "docker run -e CLOUDSDK_CONFIG=/tmp/roots/master img" },
     { expected: 2, command: "docker run -e CLOUDSDK_CONFIG=/srv/identities/master img" },
-    { expected: 0, command: "docker run -v /tmp/roots/master:/data img" },
+  ];
+  for (const item of cases) await check(t, item);
+});
+
+// Residual, deliberately left open: a relocated root named only by its path is not
+// recognisable, because nothing on the line says that path is a root. The guard
+// reads text -- it knows a root by the spellings it can name -- so it cannot tell
+// `/tmp/roots/master` from any other directory. Refusing every path that might be
+// a root is refusing every path, so this stays open and is recorded here rather
+// than presented as a rule that covers it.
+test("records the relocated root it cannot recognise by path alone (residual)", async (t) => {
+  await check(t, { expected: 0, command: "docker run -v /tmp/roots/master:/data img" });
+});
+
+// The pin's own value, named again. The exemption exists so a pinned local call is
+// not read as a handover, and it drops the assignment -- which used to take the
+// root's spelling off the line the root test reads, so a pinned command could copy
+// out the very root it pinned. A value named a second time, outside its own
+// assignment, is a root named.
+test("refuses a pin whose own root is named again as an argument", async (t) => {
+  const cases = [
+    { expected: 2, command: `CLOUDSDK_CONFIG=${PROFILES}/master cp -R ${PROFILES}/master /tmp/master-copy` },
+    { expected: 2, command: `CLOUDSDK_CONFIG=${PROFILES}/master tar czf /tmp/master.tgz -C ${PROFILES}/master .` },
+    // The same shape with a root that carries none of the letters of the default
+    // path: the variable is the only reason this is a root at all, which is why
+    // the value has to be kept rather than dropped with its assignment.
+    { expected: 2, command: "CLOUDSDK_CONFIG=/srv/identities/master cp -R /srv/identities/master /tmp/master-copy" },
+    // And the pin on its own is still the pin: it is the spelling the identity
+    // rules require of a local process.
+    { expected: 0, command: `CLOUDSDK_CONFIG=${PROFILES}/master docker push ${REGISTRY}:release` },
+  ];
+  for (const item of cases) await check(t, item);
+});
+
+// What the shell hands the tool is not what the line looks like. Quotes are how a
+// path with a space in it is written, and a root written that way is the same root:
+// matching the line with its quotes still in it read `-v "<root>":/gc` as a path
+// the guard did not know, and a quoted credential store as a file name that was
+// not one.
+//
+// The verb is where the quotes were a hole rather than a spelling. A root inside
+// quotes still carries the letters of its path, so the root half matched anyway --
+// but `"cp"` carries none of the letters of the tool it names, and the transfer
+// rule read the line as having no copying tool in it at all. `"cp" -R <root>
+// /tmp` left the guard at exit 0: the copy the rule exists for, with the tool
+// quoted, which is what a shell hands the same program either way.
+test("reads a quoted spelling as the name it is", async (t) => {
+  const cases = [
+    { expected: 2, command: `docker run -v "${GCLOUD}:/root/gc" img bash` },
+    { expected: 2, command: `cp -R "${PROFILES}/master" /tmp/master-copy` },
+    { expected: 2, command: `cat "${GCLOUD}/credentials.db"` },
+    { expected: 2, command: `docker compose -f "compose.yaml" up -d`, cwd: withRoot },
+    // The verb in quotes, which is the spelling the root test cannot see through.
+    { expected: 2, command: `"cp" -R ${PROFILES}/master /tmp/master-copy` },
+    { expected: 2, command: `'cp' -R ${PROFILES}/master /tmp/master-copy` },
+    { expected: 2, command: `"rsync" -a ${GCLOUD}/ ${GCLOUD}/../copy` },
+    { expected: 2, command: `"tar" -czf /tmp/gc.tgz ${GCLOUD}` },
+    { expected: 2, command: `"cp" -R "${PROFILES}/master" "/tmp/master-copy"` },
+    // Quotes around a path that is not a root change nothing about it.
+    { expected: 0, command: `cp -R "/tmp/data" "/tmp/other"` },
+    { expected: 0, command: `"cp" -R /tmp/data /tmp/other` },
+    { expected: 0, command: `"docker" compose -f "compose.yaml" up -d`, cwd: cleanProject },
   ];
   for (const item of cases) await check(t, item);
 });
@@ -191,6 +250,28 @@ test("records the transfer rules' structural limits (residuals)", async (t) => {
 // the guard judges, never a command the suite runs.
 test("does not refuse a program that reads a file instead of copying it (residual)", async (t) => {
   await check(t, { expected: 0, command: `dd if=${GCLOUD}/active_config of=/tmp/active_config` });
+});
+
+// Residuals, deliberately left open: the rules read the text of a command, so a
+// root the shell builds out of parts the text does not contain -- a glob, a brace,
+// a command substitution over a directory that is not itself a root -- is not a
+// root named. It is not the letters that make this a hole: a root written through
+// a variable whose assignment is on the same line still carries them, which is why
+// `R=<root>; cp -R $R /tmp` is refused. What the guard cannot see is a path the
+// text never spells out. Measured, not assumed: `cp -R $HOME/.config/*-profiles/
+// master /tmp/master-copy` and the brace beside it both leave the guard at 0, as
+// does a substitution over the same glob. A compose file the one it reads pulls in
+// by `include:` is a second hole of the same kind: the file the guard reads names
+// no root, and the file it does not read mounts one.
+test("records the spellings the shell builds out of parts (residuals)", async (t) => {
+  const included = project("includes-root", "include:\n  - ../with-root/compose.yaml\n");
+  const cases = [
+    { expected: 0, command: `cp -R $HOME/.config/*-profiles/master /tmp/master-copy` },
+    { expected: 0, command: `cp -R $HOME/.config/{gcloud-profiles}/master /tmp/master-copy` },
+    { expected: 0, command: `cp -R $(ls -d $HOME/.config/*-profiles/master) /tmp/master-copy` },
+    { expected: 0, command: `docker compose up -d`, cwd: included },
+  ];
+  for (const item of cases) await check(t, item);
 });
 
 // A profile pinned for a local process is an environment assignment, not a
@@ -252,6 +333,20 @@ test("keeps the rules that predate the transfer rules", async (t) => {
     { expected: 2, command: "cat ~/.config/gcloud/access_tokens.db" },
     { expected: 2, command: "cat ~/.config/gcloud/credentials.db" },
     { expected: 2, command: "cp ~/.config/gcloud/application_default_credentials.json ." },
+    // The legacy credential directory holds an ADC file like the other one, and a
+    // store is a store whatever it is called.
+    { expected: 2, command: "cat ~/.config/gcloud/legacy_credentials/someone@example.com/adc.json" },
+    // A global flag between the command and its subcommand is not a different
+    // call: `gcloud -q auth login` writes the ambient root exactly as the plain
+    // spelling does, and reading the subcommand as adjacent to the command word
+    // let the flag in between walk a login past the rule.
+    { expected: 2, command: "gcloud -q auth login someone@example.com" },
+    { expected: 2, command: "gcloud --quiet auth application-default login" },
+    { expected: 2, command: "gcloud auth activate-service-account --key-file=/tmp/key.json" },
+    { expected: 2, command: "gcloud config set account someone.else@example.com" },
+    // Read-only, and pinned: neither is a write to the ambient root.
+    { expected: 0, command: "gcloud -q auth list" },
+    { expected: 0, command: "CLOUDSDK_CONFIG=/tmp/root gcloud -q auth login someone@example.com" },
   ];
   for (const item of cases) await check(t, item);
 });
@@ -280,6 +375,38 @@ test("walks up to the compose file Compose itself would use", async (t) => {
 
   await check(t, { expected: 2, command: "docker compose up -d", cwd: nested });
   await check(t, { expected: 0, command: "docker compose up -d", cwd: cleanNested });
+});
+
+// A compose call is matched the way the rest of this guard matches spelling: the
+// tool by the name it carries, and a run of whitespace as the whitespace it is. A
+// tab and a second space reach the same CLI and read the same file as one space,
+// and so does another case, which on this filesystem is the same name. Each of
+// them used to miss the compose branch entirely -- so the file was never read and
+// the call left the guard with nothing to judge.
+test("reads a compose call however its words are spaced or cased", async (t) => {
+  const cases = [
+    { expected: 2, command: "docker compose up -d", cwd: withRoot },
+    { expected: 2, command: "docker  compose up -d", cwd: withRoot },
+    { expected: 2, command: "docker\tcompose up -d", cwd: withRoot },
+    { expected: 2, command: "DOCKER COMPOSE up -d", cwd: withRoot },
+    { expected: 2, command: "Docker-Compose up -d", cwd: withRoot },
+    { expected: 2, command: "podman\tcompose up -d", cwd: withRoot },
+    { expected: 2, command: "nerdctl compose up -d", cwd: withRoot },
+    // The same spellings where the file is ordinary: still nothing to refuse.
+    { expected: 0, command: "docker  compose up -d", cwd: cleanProject },
+    { expected: 0, command: "docker ps" },
+  ];
+  for (const item of cases) await check(t, item);
+});
+
+// Compose reads the file of the directory it runs in, and a `cd` on the same line
+// moves it there. Reading only the payload's working directory let `cd hostile &&
+// docker compose up` mount the root from one directory away: the guard read the
+// clean file, Compose read the other one.
+test("reads the compose file of a directory the line changes to", async (t) => {
+  await check(t, { expected: 2, command: "cd ../with-root && docker compose up -d", cwd: cleanProject });
+  await check(t, { expected: 2, command: `cd ${withRoot} && docker compose up -d`, cwd: noCompose });
+  await check(t, { expected: 0, command: `cd ${cleanProject} && docker compose up -d`, cwd: noCompose });
 });
 
 // A socket mount is a second route to the same place: whoever holds the socket

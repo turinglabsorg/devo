@@ -3,19 +3,33 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
-TOOLS_DIR="$CODEX_HOME/tools/devo"
-SKILL_DIR="$CODEX_HOME/skills/devo"
 CONFIG_DIR="$HOME/.devo"
 BIN_DIR="${DEVO_BIN_DIR:-$HOME/.local/bin}"
 HOOK_DIR="${DEVO_HOOK_DIR:-$HOME/.claude/hooks}"
 SETTINGS="$HOME/.claude/settings.json"
 
+# Every destination is made absolute before anything is written into it. The
+# manifest records where a copy went, and the doctor resolves what it reads against
+# its own working directory, so a relative spelling here -- which the environment
+# variables above allow -- makes the same install a failure from one directory and a
+# check that compared nothing from another: the copy is edited, the manifest says
+# so, and the comparison looks for a path that is not there.
+absolute() {
+  mkdir -p "$1"
+  (cd "$1" && pwd)
+}
+
+CODEX_HOME="$(absolute "$CODEX_HOME")"
+CONFIG_DIR="$(absolute "$CONFIG_DIR")"
+BIN_DIR="$(absolute "$BIN_DIR")"
+HOOK_DIR="$(absolute "$HOOK_DIR")"
+TOOLS_DIR="$CODEX_HOME/tools/devo"
+SKILL_DIR="$CODEX_HOME/skills/devo"
+
 echo "Installing Devo into $CODEX_HOME"
 
 mkdir -p "$TOOLS_DIR"
 mkdir -p "$SKILL_DIR"
-mkdir -p "$CONFIG_DIR"
-mkdir -p "$BIN_DIR"
 
 cp "$SCRIPT_DIR/index.js" "$TOOLS_DIR/index.js"
 cp "$SCRIPT_DIR/package.json" "$TOOLS_DIR/package.json"

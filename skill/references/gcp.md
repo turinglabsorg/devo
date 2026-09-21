@@ -75,28 +75,53 @@ devo gcloud --profile credilex -- run services describe credilex-api --region eu
   text: a root relocated through `DEVO_GCLOUD_PROFILES_DIR`, a symlink to one, a
   parent of one and the filesystem root itself all denote a root -- or hold every
   root -- and are all refused, so the route cannot hand over what it just pinned.
+  Each argument is read twice, because the tools it may be handed to disagree
+  about `..` after a symlink: the kernel follows the link and applies `..` to the
+  directory it reached, a text-first tool collapses `..` before following
+  anything, and `<link to a directory inside the root>/..` is the root to an
+  `open` or a `tar -C` but only the link's own directory to the other reading.
+  The route also names the profile's own `application_default_credentials.json`
+  for the child, because `CLOUDSDK_CONFIG` is where gcloud looks and not where a
+  client library looks; a profile with no such file leaves the child on the
+  ambient identity, which is reported as a warning rather than refused, and
+  recorded as a residual in `test/exec.test.mjs`.
   A `gcloud` command word reached directly is refused unless `--allow-mutation` is
   passed, so prefixing a call with `devo exec` is not a way around the router's
-  guard. That reading covers the command word: a shell wrapper that runs gcloud
+  guard -- directly, and also as a path: `/usr/local/bin/gcloud` is the same
+  program. That reading covers the command word: a shell wrapper that runs gcloud
   itself is not inspected (see the residual in `test/exec.test.mjs`), which is
   what the harness hook is for.
 
 A PreToolUse hook (`~/.claude/hooks/gcloud-guard.sh`) denies an unprefixed
-`gcloud auth login`, `gcloud config configurations activate`, `--update-adc`,
-any read of a credential store, and any mount, copy or archive of an identity
-root by a container, another host, or a copying tool (`docker`, `podman`,
-`nerdctl`, `kubectl`, `ssh`, `scp`, `rsync`, `cp`, `mv`, `tar`, `zip`). A tool is
-judged as the tool it names rather than as the word it is written with, so
-`/bin/cp` and `\cp` are the same program, and matching ignores case, because on
-this filesystem another case is the same file. A root counts as named when the
-variable that can point at one is named too (`CLOUDSDK_CONFIG`), which is what a
-relocated root looks like. A `CLOUDSDK_CONFIG=<root>` assignment that opens a
-shell segment is read as the environment pin it is, so a prefixed local call
-passes it; a root named as an argument does not, and neither does a pin spelled
-as an argument to a builtin (`export CLOUDSDK_CONFIG=<root>; cp ...`), which the
-guard refuses as the safe reading. The rule is a list of tools, so a program that
-reads a file instead of copying it is not judged; so is a verb reached through a
-variable, a copying tool that is not on the list, and an ancestor of a root.
+`gcloud auth login`, `gcloud auth application-default login`, `gcloud auth
+activate-service-account`, `gcloud config configurations activate`, `gcloud
+config set account`, `--update-adc`, any read of a credential store
+(`credentials.db`, `access_tokens.db`, `application_default_credentials.json`,
+`legacy_credentials`), and any mount, copy or archive of an identity root by a
+container, another host, or a copying tool (`docker`, `podman`, `nerdctl`,
+`kubectl`, `ssh`, `scp`, `rsync`, `cp`, `mv`, `tar`, `zip`). The auth rule reads
+the call as the word plus its subcommand with any global flags between them,
+because `gcloud -q auth login` writes the ambient root exactly as the bare
+spelling does. A tool is judged as the tool it names rather than as the word it
+is written with, so `/bin/cp` and `\cp` are the same program; quotes are removed
+before anything is matched, because `"cp"` names the same program and carries
+none of its letters; and matching ignores case, because on this filesystem
+another case is the same file. A root counts as named when the variable that can
+point at one is named too (`CLOUDSDK_CONFIG`), which is what a relocated root
+looks like. A `CLOUDSDK_CONFIG=<root>` assignment that opens a shell segment is
+read as the environment pin it is, so a prefixed local call passes it; a root
+named as an argument does not, and neither does a pin spelled as an argument to a
+builtin (`export CLOUDSDK_CONFIG=<root>; cp ...`), which the guard refuses as the
+safe reading. The value the dropped assignment named is kept and judged on its
+own, so a line that pins a root and then hands the same root to a copy is refused
+rather than exempted by its own prefix. The compose file is read too, and
+resolved the way Compose resolves it: the working directory, each directory the
+line `cd`s to, then each parent of those until one holds a compose file. The rule
+is a list of tools, so a program that reads a file instead of copying it is not
+judged; so are a verb reached through a variable, a copying tool that is not on
+the list, an ancestor of a root, a root the shell builds out of parts the command
+does not contain (a glob, a brace, a substitution over a directory that is not
+itself a root), and a compose file pulled in by another one's `include:`.
 `test/gcloud-guard.test.mjs` records each of those boundaries as a residual
 rather than letting them read like guarantees.
 

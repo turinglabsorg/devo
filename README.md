@@ -70,8 +70,15 @@ The installer copies:
 
 - CLI runtime to `${CODEX_HOME:-$HOME/.codex}/tools/devo`
 - skill files to `${CODEX_HOME:-$HOME/.codex}/skills/devo`
+- the PreToolUse guard to `~/.claude/hooks/gcloud-guard.sh`
 - config example to `~/.devo/config.example.json`
 - executable wrapper to `~/.local/bin/devo`
+
+It also records every copy it wrote, with its digest, in
+`${CODEX_HOME:-$HOME/.codex}/tools/devo/INSTALLED.json`, and `devo doctor
+--provider install` compares the installed copies against it. An installed copy
+edited in place works immediately and diverges silently, so the repository is the
+only source: edit under `skill/`, run `./install.sh`, then check.
 
 Ensure `~/.local/bin` is in `PATH`. On this workstation it is configured in `~/.zshenv`, so non-interactive shells can run `devo` directly.
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -52,13 +52,26 @@ function install({ runtime = "runtime at install time", guard = "guard at instal
   return { source, installed, guardSource, guardInstalled };
 }
 
+// HOME is redirected with the rest: two of the copies an install writes are
+// located from it (the CLI wrapper and the configuration example), so a suite
+// that left it alone would read the real machine's installation while the
+// manifest under test described a sandbox -- and would pass or fail depending on
+// whether devo happens to be installed on the machine running it.
 function checks(env = {}) {
   const previous = { ...process.env };
-  Object.assign(process.env, { CODEX_HOME: join(sandbox, "home", ".codex") }, env);
+  Object.assign(
+    process.env,
+    {
+      HOME: join(sandbox, "home"),
+      CODEX_HOME: join(sandbox, "home", ".codex"),
+      DEVO_BIN_DIR: join(sandbox, "home", ".local", "bin"),
+    },
+    env,
+  );
   try {
     return installChecks();
   } finally {
-    for (const key of ["CODEX_HOME", "DEVO_INSTALL_MANIFEST", "DEVO_HOOK_DIR"]) {
+    for (const key of ["HOME", "CODEX_HOME", "DEVO_BIN_DIR", "DEVO_INSTALL_MANIFEST", "DEVO_HOOK_DIR"]) {
       if (previous[key] === undefined) delete process.env[key];
       else process.env[key] = previous[key];
     }
@@ -255,4 +268,91 @@ test("warns when the repository has moved on since the install", (t) => {
   assert.match(moved.warning, /the repository is at .* now: the install is behind it/);
 
   t.after(() => rmSync(join(repo, ".git"), { recursive: true, force: true }));
+});
+
+// A target name is a name from a file, and a file can write any name at all.
+// Read through an object, one of them answers with a function the object
+// inherited rather than with a label, and the check would carry that as its own
+// name -- a function where every other check has a string.
+test("reads a target named after an inherited property as the name it is", () => {
+  const { installed } = install();
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  write(
+    manifestPath,
+    JSON.stringify(
+      { ...manifest, artifacts: [{ target: "constructor", source: "skill/index.js", installed, sha256: sha(installed) }] },
+      null,
+      2,
+    ),
+  );
+  const list = checks();
+  const recorded = list.filter((check) => typeof check.name === "string" && check.name.includes("constructor"));
+
+  assert.equal(recorded.length, 1, "the entry is judged under the name it carries");
+  assert.equal(recorded[0].name, 'copies recorded as "constructor"');
+  assert.equal(recorded[0].ok, true, recorded[0].error);
+});
+
+// A path the manifest records without a directory is not a path this check can
+// resolve: it is read against whatever directory the doctor was started from, so
+// the same entry names a different file in each one. Resolving it is how an
+// edited copy reads as untouched from the directory the doctor happens to run in.
+test("fails on a copy recorded as a relative path instead of resolving it", () => {
+  const { installed } = install();
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  write(
+    manifestPath,
+    JSON.stringify(
+      {
+        ...manifest,
+        artifacts: [
+          { target: "runtime", source: "skill/index.js", installed: "index.js", sha256: sha(installed) },
+        ],
+      },
+      null,
+      2,
+    ),
+  );
+  const check = find(checks(), "runtime copies (tools/devo)");
+
+  assert.equal(check.ok, false, "a path that resolves differently in every directory is not a comparison");
+  assert.match(check.error, /index\.js is recorded as a relative path/);
+  assert.match(check.error, /names a different file in every directory/);
+});
+
+// A copy that is there and cannot be read is a copy that was not compared. Left
+// to the digest alone the check would read it as changed -- and it is not known
+// to be changed; it is unknown either way, and saying which is the difference
+// between a report someone can act on and one they cannot.
+test("reports a copy it cannot read instead of calling it changed", (t) => {
+  const { installed } = install();
+  chmodSync(installed, 0o000);
+  t.after(() => chmodSync(installed, 0o644));
+  try {
+    readFileSync(installed);
+    t.skip("this user can read any file");
+    return;
+  } catch {
+    // unreadable, which is the state under test
+  }
+
+  const check = find(checks(), "runtime copies (tools/devo)");
+
+  assert.equal(check.ok, false);
+  assert.match(check.error, /could not be read, so it was not compared/);
+  assert.doesNotMatch(check.error, /was changed after it was installed/);
+});
+
+// The header is read as the strings it is meant to hold. A field of another type
+// is not a value to print: `join` throws on it, which would take the whole
+// provider down instead of reporting the manifest that cannot be read.
+test("reports a manifest header that is not a string instead of failing on it", () => {
+  install();
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  write(manifestPath, JSON.stringify({ ...manifest, repo: { path: repo } }, null, 2));
+  const list = checks();
+
+  assert.equal(list.length, 1);
+  assert.equal(list[0].ok, false);
+  assert.match(list[0].error, /repo is not a string/);
 });

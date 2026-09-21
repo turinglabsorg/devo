@@ -66,11 +66,18 @@ caller names a profile instead of a directory, and refuses to pass on any
 argument that names a root or a credential store -- judged by the path the
 argument denotes, so a relocated, symlinked or parental spelling of a root is
 refused as well, and so is the filesystem root, which holds every root there is.
+Each argument is read twice, because the tools it may be handed to disagree about
+`..` after a symlink; and because `CLOUDSDK_CONFIG` is where gcloud looks and not
+where a client library looks, the route names the profile's own ADC file for the
+child as well, reporting a profile that has none instead of refusing it.
 `devo doctor --provider install` reports installed copies that no longer match
 the digests `skill/install.sh` recorded, which is how a copy edited in place is
 found; a manifest that records no copies is a failure rather than a green line,
 and an install left on disk with no manifest at all is one too, because deleting
-that file must not be a way to silence the check.
+that file must not be a way to silence the check. Every destination the install
+writes into is made absolute first, and a copy recorded at a relative path is
+reported rather than resolved: a path that means a different file in every
+directory the doctor might run in is not a comparison.
 
 ## Safety Rules
 
