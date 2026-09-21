@@ -131,6 +131,7 @@ test("reads the records back across profiles, oldest first", () => {
     assert.ok(all[0].at <= all[1].at, "records must come back in time order");
     assert.equal(historyPath("master").endsWith(join("auth-status", "master.jsonl")), true);
     assert.notEqual(historyPath("master"), historyPath("credilex"));
+    assert.throws(() => historyPath(), /needs a profile name/, "a nameless path would be undefined.jsonl");
   } finally {
     process.env.HOME = previous;
   }

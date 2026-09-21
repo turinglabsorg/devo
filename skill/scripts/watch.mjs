@@ -46,6 +46,12 @@ export function historyDir() {
  * the question the history is kept for at all: which identity was a run about.
  */
 export function historyPath(profileName) {
+  if (!profileName) {
+    // Without the check this returns `undefined.jsonl`: a record that is written,
+    // read back as a profile called "undefined", and never counted against the
+    // identity it was about. Fail where the caller can see it instead.
+    throw new Error("historyPath needs a profile name: the record path is per profile");
+  }
   return join(historyDir(), `${profileName}.jsonl`);
 }
 
