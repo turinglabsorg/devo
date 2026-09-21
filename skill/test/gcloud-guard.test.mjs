@@ -18,6 +18,7 @@ const HOOK = join(import.meta.dirname, "..", "hooks", "gcloud-guard.sh");
 const GCLOUD = join(homedir(), ".config", "gcloud");
 const PROFILES = join(homedir(), ".config", "gcloud-profiles");
 const DOCKER_SOCK = "/var/run/docker.sock";
+const REGISTRY = "europe-west1-docker.pkg.dev/example-project/app";
 
 const COMPOSE_WITH_GCLOUD = [
   "services:",
@@ -91,6 +92,28 @@ test("refuses handing an identity root to a container or to another host", async
     { expected: 2, command: "docker-compose up", cwd: withRoot },
     { expected: 2, command: "docker compose -f compose.yaml up -d", cwd: withRoot },
     { expected: 2, command: `docker compose -f ${strayCompose} up -d` },
+  ];
+  for (const item of cases) await check(t, item);
+});
+
+// A profile pinned for a local process is an environment assignment, not a
+// transfer: the docker CLI and the credential helper it spawns read the root
+// instead of receiving it, and the identity rules require that pin on every such
+// process. The rule is about how the root is spelled -- an assignment that opens a
+// command word is dropped before the transfer test, a root named as an argument is
+// not.
+test("judges an identity root by how the command spells it", async (t) => {
+  const cases = [
+    { expected: 0, command: `CLOUDSDK_CONFIG=${PROFILES}/master docker push ${REGISTRY}:release-20260921-final-votes` },
+    { expected: 0, command: `CLOUDSDK_CONFIG=${PROFILES}/master docker tag app:release ${REGISTRY}:tag && CLOUDSDK_CONFIG=${PROFILES}/master docker push ${REGISTRY}:tag` },
+    { expected: 0, command: `true; CLOUDSDK_CONFIG=${PROFILES}/master docker images --format id` },
+    { expected: 0, command: `x=$(CLOUDSDK_CONFIG=${PROFILES}/master docker images --format id)` },
+    // The root stays an argument to the transfer verb, so these are refused even
+    // with a correct prefix elsewhere on the same line.
+    { expected: 2, command: `CLOUDSDK_CONFIG=${PROFILES}/master docker run -v ${GCLOUD}:/gc img` },
+    { expected: 2, command: `CLOUDSDK_CONFIG=${PROFILES}/master docker cp ${GCLOUD}/active_config ctr:/root/` },
+    { expected: 2, command: `docker run -e CLOUDSDK_CONFIG=${PROFILES}/master img` },
+    { expected: 2, command: `docker build -t img ${PROFILES}/master` },
   ];
   for (const item of cases) await check(t, item);
 });

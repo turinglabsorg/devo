@@ -100,10 +100,25 @@ esac
 # a command naming none of them has nothing to answer for.
 printf '%s' "$command" | grep -qE '(gcloud|GOOGLE_APPLICATION_CREDENTIALS|application_default_credentials|access_tokens[.]db|credentials[.]db)' || exit 0
 
+# A command-leading CLOUDSDK_CONFIG assignment pins one profile for one local
+# process. The root is not handed over: the docker CLI and the credential helper
+# it spawns are themselves local, and pinning the root is what the identity rules
+# require of every one of them. Reading the prefix as a transfer made the guard
+# refuse the registry push of a release, so the assignment is dropped before the
+# transfer test -- and in that spelling only. A root still named as an argument is
+# a mount, a copy or a build context, which is the incident this guard exists for:
+#   CLOUDSDK_CONFIG=<root> docker push ...    dropped, judged below
+#   docker run -v <root>:<path> ...           kept, denied
+#   docker run -e CLOUDSDK_CONFIG=<root> ...  kept, denied: not command-leading
+# "Command-leading" is shell grammar, not a special case: an assignment may follow
+# a separator or open a subshell or a process substitution, and each of those
+# begins a command word.
+judged=$(printf '%s' "$command" | sed -E 's/(^|[;|&({])[[:space:]]*CLOUDSDK_CONFIG=[^[:space:];|&)]*/\1/g')
+
 # A transfer verb plus a root path: the directory leaves, or enters, the machine
 # without gcloud being called at all.
-if printf '%s' "$command" | grep -qE "(^|[[:space:];|&(])${TRANSFER_VERB}[[:space:]]" \
-  && printf '%s' "$command" | grep -qE "$GCLOUD_PATH"; then
+if printf '%s' "$judged" | grep -qE "(^|[[:space:];|&(])${TRANSFER_VERB}[[:space:]]" \
+  && printf '%s' "$judged" | grep -qE "$GCLOUD_PATH"; then
   deny_transfer "this hands a gcloud identity root to a container or to another host."
 fi
 
