@@ -58,7 +58,7 @@ function checks(env = {}) {
   try {
     return installChecks();
   } finally {
-    for (const key of ["CODEX_HOME", "DEVO_INSTALL_MANIFEST"]) {
+    for (const key of ["CODEX_HOME", "DEVO_INSTALL_MANIFEST", "DEVO_HOOK_DIR"]) {
       if (previous[key] === undefined) delete process.env[key];
       else process.env[key] = previous[key];
     }
@@ -116,15 +116,104 @@ test("reports an installed copy that is gone", () => {
   assert.match(check.error, /index\.js is missing/);
 });
 
-// An install that predates the manifest left nothing to compare against. Saying
-// "ok" would claim a check that could not be made, so it is a skip instead.
-test("skips instead of claiming success when there is no manifest", () => {
+// A machine devo was never installed on has no check to make. Saying "ok" would
+// claim a verification of an installation that is not there, so the check is not
+// ok at all -- `ok: false` with `skipped: true`, the shape `doctor.mjs` gives a
+// tool that is not installed. `allOk` keeps the provider green on a skip, so the
+// exit status still says "nothing failed", which is true: nothing was judged.
+test("skips instead of claiming success where nothing is installed", () => {
   install();
-  const list = checks({ DEVO_INSTALL_MANIFEST: join(sandbox, "nowhere", "INSTALLED.json") });
+  const empty = join(sandbox, "nothing-installed");
+  const list = checks({
+    DEVO_INSTALL_MANIFEST: join(sandbox, "nowhere", "INSTALLED.json"),
+    CODEX_HOME: join(empty, "codex"),
+    DEVO_HOOK_DIR: join(empty, "hooks"),
+  });
 
   assert.equal(list.length, 1);
   assert.equal(list[0].skipped, true);
-  assert.equal(list[0].ok, true);
+  assert.equal(list[0].ok, false, "a check that could not be made is never ok");
+  assert.match(list[0].summary, /devo is not installed here/);
+  assert.match(list[0].summary, /run skill\/install\.sh/);
+});
+
+// The one deletion that would otherwise turn this check green. Copies are on disk
+// and nothing records what was written into them, which is not an install that
+// was compared and came out matching -- it is an install that cannot be compared
+// at all, and it has to read as a failure with the remedy, not as a skip.
+test("fails when the copies are there and the manifest is not", () => {
+  install();
+  rmSync(manifestPath);
+  const list = checks();
+
+  assert.equal(list.length, 1);
+  assert.equal(list[0].ok, false);
+  assert.equal(list[0].skipped, undefined, "an install that is there is never a skip");
+  assert.match(list[0].error, /nothing records what was written into it/);
+  assert.match(list[0].error, /run skill\/install\.sh/);
+  assert.match(list[0].error, /tools[/\\]devo/, "every copy it found is named");
+});
+
+// A manifest that records nothing verifies nothing, and the header line alone
+// would read as a healthy install: it carries a timestamp and a commit.
+test("fails on a manifest that records no copies", () => {
+  install();
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  write(manifestPath, JSON.stringify({ ...manifest, artifacts: [] }, null, 2));
+  const list = checks();
+
+  assert.equal(list.length, 1);
+  assert.equal(list[0].ok, false);
+  assert.match(list[0].error, /records no copies/);
+});
+
+// An entry that is not a record is a manifest that cannot be read as one. Read
+// as an entry to compare, it would throw on the first property and take the whole
+// doctor down with it.
+test("fails on a manifest entry that is not a recorded copy", () => {
+  install();
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  write(manifestPath, JSON.stringify({ ...manifest, artifacts: [...manifest.artifacts, null] }, null, 2));
+  const list = checks();
+
+  assert.equal(list.length, 1);
+  assert.equal(list[0].ok, false);
+  assert.match(list[0].error, /not a recorded copy/);
+});
+
+// Every copy the manifest records is judged. A target this check does not know by
+// name is grouped under the name it carries -- a copy the drift check dropped
+// silently was a copy reported as verified by a check that never looked at it.
+test("judges a copy recorded under a target it does not know", () => {
+  const { installed } = install();
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  write(
+    manifestPath,
+    JSON.stringify(
+      { ...manifest, artifacts: [...manifest.artifacts, { target: "runtme", source: "skill/index.js", installed, sha256: sha(installed) }] },
+      null,
+      2,
+    ),
+  );
+  writeFileSync(installed, "edited after the install");
+  const check = find(checks(), 'copies recorded as "runtme"');
+
+  assert.ok(check, "a copy the manifest records must be reported");
+  assert.equal(check.ok, false);
+  assert.match(check.error, /was changed after it was installed/);
+});
+
+// A kind of copy nobody recorded is nothing to compare: skipped, because a skip
+// is visibly not a pass, and not a failure, because an install that writes no
+// copy of that kind has nothing to diverge from.
+test("skips a kind of copy the manifest does not record", () => {
+  install();
+  const check = find(checks(), "configuration example (~/.devo)");
+
+  assert.ok(check, "a kind of copy the install writes is still named");
+  assert.equal(check.skipped, true);
+  assert.equal(check.ok, false);
+  assert.match(check.summary, /no config copy is recorded/);
 });
 
 test("reports an unreadable manifest rather than an empty one", () => {

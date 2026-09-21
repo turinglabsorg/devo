@@ -63,9 +63,14 @@ A process that is not gcloud -- the docker CLI and the credential helper it
 spawns, terraform, an ADC client library -- needs the same root and has no gcloud
 flags to carry it. `devo exec` pins the root for the command it starts, so the
 caller names a profile instead of a directory, and refuses to pass on any
-argument that names a root or a credential store. `devo doctor --provider
-install` reports installed copies that no longer match the digests
-`skill/install.sh` recorded, which is how a copy edited in place is found.
+argument that names a root or a credential store -- judged by the path the
+argument denotes, so a relocated, symlinked or parental spelling of a root is
+refused as well, and so is the filesystem root, which holds every root there is.
+`devo doctor --provider install` reports installed copies that no longer match
+the digests `skill/install.sh` recorded, which is how a copy edited in place is
+found; a manifest that records no copies is a failure rather than a green line,
+and an install left on disk with no manifest at all is one too, because deleting
+that file must not be a way to silence the check.
 
 ## Safety Rules
 

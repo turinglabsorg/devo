@@ -75,6 +75,21 @@ else
       "$target" "$source_rel" "$installed" "$(shasum -a 256 "$installed" | awk '{print $1}')"
   }
 
+  # Every file of a copied tree, at any depth. A tree is copied whole, so a file
+  # added anywhere in it is a copy this install writes; recording only the first
+  # level left the deeper ones editable in place with nothing to compare them to.
+  # Read with `find` into this shell rather than through a pipe, because a loop on
+  # the far side of a pipe cannot add to the manifest the first entry starts.
+  record_tree() {
+    target=$1
+    area=$2
+    installed_dir=$3
+    while IFS= read -r file; do
+      rel="${file#"$SCRIPT_DIR/$area/"}"
+      record "$target" "skill/$area/$rel" "$installed_dir/$rel"
+    done < <(find "$SCRIPT_DIR/$area" -type f | LC_ALL=C sort)
+  }
+
   {
     printf '{\n'
     printf '  "installedAt": "%s",\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -83,19 +98,17 @@ else
     printf '  "artifacts": [\n'
     record runtime "skill/index.js" "$TOOLS_DIR/index.js"
     record runtime "skill/package.json" "$TOOLS_DIR/package.json"
-    for file in "$SCRIPT_DIR"/scripts/*.mjs; do
-      name="$(basename "$file")"
-      record runtime "skill/scripts/$name" "$TOOLS_DIR/scripts/$name"
-    done
+    record_tree runtime scripts "$TOOLS_DIR/scripts"
     record skill "skill/SKILL.md" "$SKILL_DIR/SKILL.md"
-    for file in "$SCRIPT_DIR"/agents/* "$SCRIPT_DIR"/references/*; do
-      name="$(basename "$file")"
-      case "$file" in
-        */agents/*) record skill "skill/agents/$name" "$SKILL_DIR/agents/$name" ;;
-        */references/*) record skill "skill/references/$name" "$SKILL_DIR/references/$name" ;;
-      esac
-    done
+    record_tree skill agents "$SKILL_DIR/agents"
+    record_tree skill references "$SKILL_DIR/references"
     record hook "skill/hooks/gcloud-guard.sh" "$HOOK_DIR/gcloud-guard.sh"
+    # Written by this script rather than copied, and still copies like the rest:
+    # a wrapper edited in place, or an example config quietly changed, is the same
+    # divergence -- so they are recorded too. The wrapper has no repository source
+    # to be newer than, so it is recorded as what it is.
+    record wrapper "(written by skill/install.sh)" "$BIN_DIR/devo"
+    record config "devo.config.example.json" "$CONFIG_DIR/config.example.json"
     printf '\n  ]\n}\n'
   } > "$MANIFEST.tmp"
   mv "$MANIFEST.tmp" "$MANIFEST"

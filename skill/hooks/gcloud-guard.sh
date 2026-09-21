@@ -13,6 +13,14 @@
 # and a `-v` of the gcloud config passed this guard untouched. So the guard
 # judges the mounts and the copies too, not only the gcloud invocations.
 #
+# A copy off this disk leaves the root as surely as a mount leaves the machine,
+# and a copy is what gets committed by accident, so the copying tools are judged
+# with the mount. And nothing here rests on spelling: a verb is read as the tool
+# it names (`/bin/cp`, `\cp`, another case), a root is recognised both as a path
+# and as the variable that can point at one, and the compose file is read because
+# it hides a mount from the command line. What these rules cannot see is recorded
+# as a residual test in test/gcloud-guard.test.mjs rather than claimed here.
+#
 # Reads the hook payload on stdin. Exit 2 blocks the call and returns the
 # message on stderr.
 set -eu
@@ -24,10 +32,21 @@ cwd=$(printf '%s' "$payload" | jq -r '.cwd // ""')
 [ -n "$command" ] || exit 0
 
 # An identity root, however it is spelled: the ambient root, any profile root,
-# the ADC file, or a credential store inside one of them.
-GCLOUD_PATH='([.]config/gcloud|GOOGLE_APPLICATION_CREDENTIALS|application_default_credentials[.]json|access_tokens[.]db|credentials[.]db)'
-# Ways of handing a path to something other than a local gcloud.
-TRANSFER_VERB='(docker|docker-compose|podman|nerdctl|colima|limactl|vagrant|kubectl|ssh|scp|rsync)'
+# the ADC file, a credential store inside one of them, or the variable the
+# identity rules name a root with. Matched case-insensitively further down: on a
+# case-insensitive filesystem another case is the same directory, and the spelling
+# of a variable that points at a root is a root named.
+GCLOUD_PATH='([.]config/gcloud|GOOGLE_APPLICATION_CREDENTIALS[=/]|CLOUDSDK_CONFIG|application_default_credentials[.]json|access_tokens[.]db|credentials[.]db)'
+# Ways of handing a path to something other than a local gcloud: a container or
+# another host, and -- for the copying tools -- a place on this disk that is not
+# the root. A copy leaves the protected root just as a mount leaves the machine,
+# and a copy is what ends up committed by accident.
+TRANSFER_VERB='(docker|docker-compose|podman|nerdctl|colima|limactl|vagrant|kubectl|ssh|scp|rsync|cp|mv|tar|zip)'
+# What may stand in front of the verb without changing which tool is called: an
+# escape (`\cp`, the alias-bypassing spelling) and a directory (`/bin/cp`,
+# `/usr/local/bin/rsync`). A transfer verb is judged as the tool it names, not as
+# the word it is written with.
+TRANSFER_WORD='(^|[[:space:];|&(])\\?([^[:space:];|&]*/)?'
 
 deny() {
   printf 'BLOCKED by gcloud-guard: %s\n' "$1" >&2
@@ -40,8 +59,8 @@ deny() {
 
 deny_transfer() {
   printf 'BLOCKED by gcloud-guard: %s\n' "$1" >&2
-  printf 'An identity root must never be mounted into, or copied to, anything else:\n' >&2
-  printf '  docker run -v <gcloud path>:<path>   docker cp   ssh   scp   rsync   limactl\n' >&2
+  printf 'An identity root must never be mounted into, copied to, or packed for anything else:\n' >&2
+  printf '  docker run -v <gcloud path>:<path>   docker cp   ssh   scp   rsync   cp   mv   tar   zip\n' >&2
   printf 'That is how a container on this Mac was reading the ambient shared root.\n' >&2
   printf 'Keep the roots off every mount, and route gcloud calls through the profile:\n' >&2
   printf '  devo gcloud --profile <name> [--project <id>] -- <gcloud args...>\n' >&2
@@ -53,7 +72,7 @@ deny_transfer() {
 # read. Judged before the gcloud trigger below, because `docker compose up -d`
 # names neither gcloud nor a path.
 case "$command" in
-  *"docker compose"*|*docker-compose*|*"podman compose"*)
+  *"docker compose"*|*docker-compose*|*"podman compose"*|*"nerdctl compose"*)
     compose_files=$(printf '%s' "$command" | tr ' =' '\n\n' | grep -E '\.ya?ml$' || true)
     if [ -z "$compose_files" ]; then
       # Compose walks up from the working directory: measured on v2.36, a call in
@@ -87,7 +106,7 @@ case "$command" in
         *) compose_path=${cwd:-.}/$compose_file ;;
       esac
       [ -f "$compose_path" ] || continue
-      hit=$(grep -nE "$GCLOUD_PATH" "$compose_path" 2>/dev/null | head -3 || true)
+      hit=$(grep -niE "$GCLOUD_PATH" "$compose_path" 2>/dev/null | head -3 || true)
       if [ -n "$hit" ]; then
         deny_transfer "the compose file $compose_path mounts or names a gcloud identity root:
   $hit"
@@ -96,9 +115,20 @@ case "$command" in
     ;;
 esac
 
+# Before the trigger below, because the flag names identity material itself and
+# does not have to stand next to a gcloud word: in a spelling like `devo auth
+# repair master --update-adc` the flag is the only token the trigger would have to
+# recognise, and writing the ambient root's ADC is what the flag does.
+if printf '%s' "$command" | grep -q -- '--update-adc'; then
+  deny "--update-adc overwrites the application default credentials of the ambient root."
+fi
+
 # Everything below is about gcloud itself or about a credential store on disk;
-# a command naming none of them has nothing to answer for.
-printf '%s' "$command" | grep -qE '(gcloud|GOOGLE_APPLICATION_CREDENTIALS|application_default_credentials|access_tokens[.]db|credentials[.]db)' || exit 0
+# a command naming none of them has nothing to answer for. CLOUDSDK_CONFIG is in
+# the list for the same reason the rest of them are: it is how a root gets named
+# without any of the letters of its path, and a root relocated that way would
+# otherwise leave the guard at this line.
+printf '%s' "$command" | grep -qiE '(gcloud|GOOGLE_APPLICATION_CREDENTIALS|CLOUDSDK_CONFIG|application_default_credentials|access_tokens[.]db|credentials[.]db)' || exit 0
 
 # A command-leading CLOUDSDK_CONFIG assignment pins one profile for one local
 # process. The root is not handed over: the docker CLI and the credential helper
@@ -115,29 +145,33 @@ printf '%s' "$command" | grep -qE '(gcloud|GOOGLE_APPLICATION_CREDENTIALS|applic
 # begins a command word.
 judged=$(printf '%s' "$command" | sed -E 's/(^|[;|&({])[[:space:]]*CLOUDSDK_CONFIG=[^[:space:];|&)]*/\1/g')
 
-# A transfer verb plus a root path: the directory leaves, or enters, the machine
-# without gcloud being called at all.
-if printf '%s' "$judged" | grep -qE "(^|[[:space:];|&(])${TRANSFER_VERB}[[:space:]]" \
-  && printf '%s' "$judged" | grep -qE "$GCLOUD_PATH"; then
-  deny_transfer "this hands a gcloud identity root to a container or to another host."
+# A transfer verb plus a root path: the directory leaves the root -- into a
+# container, onto another host, or into a copy on this disk -- without gcloud
+# being called at all. The verb is read with whatever leads up to it, because a
+# path or an escape in front of the name is the same tool being called
+# (`/bin/cp`, `\cp`); and both halves are matched without regard to case, since
+# the same directory answers to both cases on this filesystem.
+if printf '%s' "$judged" | grep -qiE "${TRANSFER_WORD}${TRANSFER_VERB}[[:space:]]" \
+  && printf '%s' "$judged" | grep -qiE "$GCLOUD_PATH"; then
+  deny_transfer "this hands a gcloud identity root to a container, to another host, or to a copy outside the root."
 fi
 
 # A ban is judged per shell segment, so a correct prefix elsewhere on the line
-# cannot launder an unprefixed call.
-unprefixed=$(printf '%s' "$command" | tr ';|&' '\n\n\n' \
-  | grep -E 'gcloud[[:space:]]+(auth[[:space:]]+(login|application-default)|config[[:space:]]+configurations[[:space:]]+activate)' \
-  | grep -v 'CLOUDSDK_CONFIG=' || true)
+# cannot launder an unprefixed call. The exemption is the assignment that opens a
+# segment, and only that: the whole segment goes with it, because the segment is
+# the pinned call. Testing for the letters anywhere on the segment let a call
+# launder itself by naming the variable somewhere else -- as an argument, or in a
+# trailing comment -- which is not a pin of anything.
+unprefixed=$(printf '%s' "$command" | tr ';|&(' '\n\n\n\n' \
+  | sed -E '/^[[:space:]]*CLOUDSDK_CONFIG=/d' \
+  | grep -iE 'gcloud[[:space:]]+(auth[[:space:]]+(login|application-default)|config[[:space:]]+configurations[[:space:]]+activate)' || true)
 
 if [ -n "$unprefixed" ]; then
   deny "gcloud authentication/configuration command without CLOUDSDK_CONFIG:
   $unprefixed"
 fi
 
-if printf '%s' "$command" | grep -q -- '--update-adc'; then
-  deny "--update-adc overwrites the application default credentials of the ambient root."
-fi
-
-if printf '%s' "$command" | grep -qE '(access_tokens\.db|credentials\.db|application_default_credentials\.json)'; then
+if printf '%s' "$command" | grep -qiE '(access_tokens\.db|credentials\.db|application_default_credentials\.json)'; then
   deny "reading or copying a gcloud credential store is never allowed."
 fi
 

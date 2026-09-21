@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -98,6 +98,121 @@ test("refuses to pass on any spelling of an identity root", async (t) => {
       assert.match(result.stderr, /Refusing to pass on/);
     });
   }
+});
+
+// The refusal cannot rest on how a root is written, because the roots are
+// configuration and a directory has more than one spelling. A root relocated
+// through the registry's own variable contains none of the letters of the
+// default path; a parent hands the root over just as surely as the root itself;
+// and a bind mount carries the path inside a larger argument. Each is judged by
+// the path it denotes.
+test("refuses a root spelled without any of its usual text", async (t) => {
+  const relocated = mkdtempSync(join(tmpdir(), "devo-exec-relocated-"));
+  t.after(() => rmSync(relocated, { recursive: true, force: true }));
+  const relocatedRoot = join(relocated, "master");
+  mkdirSync(relocatedRoot, { recursive: true });
+  const alias = join(relocated, "alias");
+  symlinkSync(relocatedRoot, alias);
+  const env = { DEVO_GCLOUD_PROFILES_DIR: relocated };
+
+  const spellings = [
+    relocatedRoot, // the root the route itself pins
+    join(relocatedRoot, "configurations"), // inside it: a configuration file or a store
+    relocated, // above it: a mount of the parent
+    alias, // another name for it, which only resolution can see through
+    `type=bind,src=${relocatedRoot},dest=/gc`, // the shape `--mount` carries
+  ];
+
+  for (const spelling of spellings) {
+    await t.test(spelling.slice(-32), () => {
+      const result = run(["exec", "--profile", "master", "--", "stub", "--mount", spelling], env);
+      assert.equal(result.status, 1, `expected a refusal for: ${spelling}`);
+      assert.match(result.stderr, /Refusing to pass on/);
+    });
+  }
+});
+
+// The broadest spelling of a parent. The filesystem root holds every root there
+// is, and it is the one ancestor the inside/above test cannot see, because it is
+// above all of them -- the root of the filesystem is its own parent.
+test("refuses the filesystem root as a mount source", async (t) => {
+  for (const spelling of ["/", "//"]) {
+    await t.test(`-v ${spelling}:/host`, () => {
+      const result = run(["exec", "--profile", "master", "--", "true", "-v", `${spelling}:/host`]);
+      assert.equal(result.status, 1, `expected a refusal for a mount of ${spelling}`);
+      assert.match(result.stderr, /Refusing to pass on/);
+    });
+  }
+
+  const bind = run(["exec", "--profile", "master", "--", "stub", "--mount", "type=bind,src=/,dest=/host"]);
+  assert.equal(bind.status, 1, "the shape --mount carries is a spelling like any other");
+  assert.match(bind.stderr, /Refusing to pass on/);
+});
+
+// The filesystem decides this one, so it is only asserted where the other case
+// really is the same directory -- the check must not depend on which filesystem
+// the suite runs on. The two are the same directory when they are the same inode,
+// which is what the filesystem itself answers; comparing resolved paths would ask
+// the wrong question, because `realpathSync` returns the case it was asked for
+// rather than the case the directory is stored under (measured on this Mac: it
+// answers `/tmp/.../MASTER` for a path spelled that way).
+test("refuses a root written in another case, where that is the same directory", (t) => {
+  const other = join(root, "MASTER");
+  let sameDirectory = false;
+  try {
+    const one = statSync(other);
+    const stored = statSync(join(root, "master"));
+    sameDirectory = one.dev === stored.dev && one.ino === stored.ino;
+  } catch {
+    sameDirectory = false;
+  }
+  if (!sameDirectory) return t.skip("this filesystem tells the two cases apart");
+
+  const result = run(["exec", "--profile", "master", "--", "stub", "--mount", other]);
+
+  assert.equal(result.status, 1, "the same directory in another case is the same root");
+  assert.match(result.stderr, /Refusing to pass on/);
+});
+
+// The other half of the rule, and the reason the check resolves instead of
+// refusing every path: an ordinary mount, an ordinary flag value and an ordinary
+// image name are none of them identity material, and must still pass.
+test("lets ordinary paths and words through", () => {
+  const result = run([
+    "exec",
+    "--profile",
+    "master",
+    "--",
+    "true",
+    "-v",
+    "/tmp/devo-exec-not-identity:/data",
+    "--format=id",
+    "myapp:latest",
+  ]);
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+// Residual, deliberately left open: the mutation guard reads the command word,
+// so a shell wrapper is not inspected -- `sh -c 'gcloud config set ...'` would
+// reach gcloud with the pinned root, and no text test can bound what a shell
+// string does. A heuristic that looked like one would be worse than this
+// boundary being visible: the harness guard judges that call, this route does
+// not. The payload here is inert (printf, never gcloud) because the suite runs
+// no cloud command at all; it shows the boundary instead of exercising it.
+test("does not inspect a shell wrapper that runs gcloud itself (residual)", () => {
+  const result = run([
+    "exec",
+    "--profile",
+    "master",
+    "--",
+    "sh",
+    "-c",
+    'printf %s "gcloud config set project other"',
+  ]);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "gcloud config set project other");
 });
 
 // Prefixing a call with `devo exec` must not side-step the router's guard: a

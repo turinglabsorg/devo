@@ -71,16 +71,34 @@ devo gcloud --profile credilex -- run services describe credilex-api --region eu
 - `devo exec --profile <name> [--project <id>] -- <command...>` pins the same root
   for a process that is not gcloud: the docker CLI and the credential helper it
   spawns, terraform, an ADC client library. It refuses any argument that names a
-  root or a credential store, so the route cannot hand one over, and it refuses a
-  `gcloud` mutation unless `--allow-mutation` is passed, so prefixing a call with
-  `devo exec` is not a way around the router's guard.
+  root or a credential store, and judges that argument as a path rather than as
+  text: a root relocated through `DEVO_GCLOUD_PROFILES_DIR`, a symlink to one, a
+  parent of one and the filesystem root itself all denote a root -- or hold every
+  root -- and are all refused, so the route cannot hand over what it just pinned.
+  A `gcloud` command word reached directly is refused unless `--allow-mutation` is
+  passed, so prefixing a call with `devo exec` is not a way around the router's
+  guard. That reading covers the command word: a shell wrapper that runs gcloud
+  itself is not inspected (see the residual in `test/exec.test.mjs`), which is
+  what the harness hook is for.
 
 A PreToolUse hook (`~/.claude/hooks/gcloud-guard.sh`) denies an unprefixed
 `gcloud auth login`, `gcloud config configurations activate`, `--update-adc`,
-any read of a credential store, and any mount or copy of an identity root. A
-`CLOUDSDK_CONFIG=<root>` assignment that opens a command word is read as the
-environment pin it is, so a prefixed local call passes it; a root named as an
-argument does not.
+any read of a credential store, and any mount, copy or archive of an identity
+root by a container, another host, or a copying tool (`docker`, `podman`,
+`nerdctl`, `kubectl`, `ssh`, `scp`, `rsync`, `cp`, `mv`, `tar`, `zip`). A tool is
+judged as the tool it names rather than as the word it is written with, so
+`/bin/cp` and `\cp` are the same program, and matching ignores case, because on
+this filesystem another case is the same file. A root counts as named when the
+variable that can point at one is named too (`CLOUDSDK_CONFIG`), which is what a
+relocated root looks like. A `CLOUDSDK_CONFIG=<root>` assignment that opens a
+shell segment is read as the environment pin it is, so a prefixed local call
+passes it; a root named as an argument does not, and neither does a pin spelled
+as an argument to a builtin (`export CLOUDSDK_CONFIG=<root>; cp ...`), which the
+guard refuses as the safe reading. The rule is a list of tools, so a program that
+reads a file instead of copying it is not judged; so is a verb reached through a
+variable, a copying tool that is not on the list, and an ancestor of a root.
+`test/gcloud-guard.test.mjs` records each of those boundaries as a residual
+rather than letting them read like guarantees.
 
 Prefer `devo exec` when a non-gcloud process needs the same root, and `devo
 gcloud` for audit commands. The raw `CLOUDSDK_CONFIG` form below is for
