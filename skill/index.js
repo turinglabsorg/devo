@@ -13,7 +13,7 @@ import {
   runDoctor,
 } from "./scripts/doctor.mjs";
 import { repairProfile, runGcloud } from "./scripts/gcloud.mjs";
-import { gcloudProfilesDir, listProfiles, probeProfile } from "./scripts/profiles.mjs";
+import { findProfile, gcloudProfilesDir, listProfiles, probeProfile } from "./scripts/profiles.mjs";
 import { historyPath, installWatch, uninstallWatch, watchStatus } from "./scripts/watch.mjs";
 
 const args = process.argv.slice(2);
@@ -41,7 +41,7 @@ Usage:
   devo commands [gcp|aws|digitalocean] [topic] [--tenant name] [--config path]
   devo profiles [--probe] [--json]
   devo gcloud --profile <name> [--project id] [--account email] [--allow-mutation] [--tty] -- <gcloud args>
-  devo auth status [--quiet] [--notify] [--json] [--record]
+  devo auth status [--profile name] [--quiet] [--notify] [--json] [--record]
   devo auth watch [--install [--interval seconds] | --uninstall]
   devo auth repair <profile>
 
@@ -174,9 +174,15 @@ function printProfilesHuman(report) {
  * This is a detector, not a keep-alive. A refresh token is not expired by short
  * inactivity, so polling it cannot stop it from dying; what the poll buys is
  * finding out within the hour instead of in the middle of a task.
+ *
+ * --profile narrows the probe to one identity, which together with --record is
+ * what keeps two processes on two identities out of each other's files: the
+ * record path is derived from the profile.
  */
-function authStatus({ quiet, notify, json, record }) {
-  const profiles = listProfiles().filter((profile) => profile.declared && profile.healthProject);
+function authStatus({ quiet, notify, json, record, profileName }) {
+  const profiles = profileName
+    ? [probeableProfile(profileName)]
+    : listProfiles().filter((profile) => profile.declared && profile.healthProject);
   const results = profiles.map((profile) => {
     const { name, ...probe } = probeProfile(profile);
     return { profile: profile.name, ...probe };
@@ -207,25 +213,54 @@ function authStatus({ quiet, notify, json, record }) {
   return failing.length ? 1 : 0;
 }
 
+/** Fail closed on a name that would otherwise probe nothing and report success. */
+function probeableProfile(name) {
+  const profile = findProfile(name);
+  if (!profile) {
+    throw new Error(
+      `Unknown profile: ${name}. Known profiles: ${listProfiles()
+        .map((candidate) => candidate.name)
+        .join(", ")}`,
+    );
+  }
+
+  if (!profile.declared || !profile.healthProject) {
+    const probed = listProfiles()
+      .filter((candidate) => candidate.declared && candidate.healthProject)
+      .map((candidate) => candidate.name);
+    throw new Error(
+      `Profile ${name} has no health project configured, so there is nothing to probe. Probed profiles: ${probed.join(", ") || "(none)"}`,
+    );
+  }
+
+  return profile;
+}
+
 /**
- * One line per run, so the interval between failures can be measured -- and the
- * reason, so a later reader does not have to guess which failure it was.
+ * One line per profile, in that profile's own file, so the interval between
+ * failures can be measured -- and the reason, so a later reader does not have to
+ * guess which failure it was.
+ *
+ * The path carries the profile. A caller that probes one identity writes one
+ * file that no other identity's process opens, which is the whole reason the
+ * records are split: a shared file cannot be written by two agents working on
+ * two gclouds without one of them being in the other's way.
  */
 function recordHistory(results) {
-  const path = historyPath();
-  mkdirSync(dirname(path), { recursive: true });
-  const line = JSON.stringify({
-    at: new Date().toISOString(),
-    results: results.map((result) => ({
+  for (const result of results) {
+    const path = historyPath(result.profile);
+    mkdirSync(dirname(path), { recursive: true });
+    const line = JSON.stringify({
+      at: new Date().toISOString(),
       profile: result.profile,
       ok: result.ok === true,
       summary: result.summary,
       ...(result.ok === true ? {} : { stale: result.stale === true, timedOut: result.timedOut === true }),
       ...(result.attempts ? { attempts: result.attempts } : {}),
       ...(result.ok === true ? {} : { error: result.error || "" }),
-    })),
-  });
-  appendFileSync(path, `${line}\n`);
+    });
+    appendFileSync(path, `${line}\n`);
+  }
 }
 
 /** A desktop notice, so a dead profile is seen without opening a log file. */
@@ -263,12 +298,15 @@ function printWatchStatus(report) {
   console.log(`  plist: ${report.plist}`);
   console.log(`  launchd: ${report.loaded ? "loaded" : "NOT loaded"}`);
   console.log(`  interval: ${report.intervalSeconds}s`);
-  console.log(`  runs recorded: ${report.runs} (failures: ${report.failures})`);
-  if (report.lastRun) console.log(`  last run: ${report.lastRun.at}`);
+  console.log(`  records: ${report.runs} (failures: ${report.failures})`);
+  if (report.lastRun) console.log(`  last run: ${report.lastRun.at} (${report.lastRun.profile})`);
   if (report.lastFailure) {
-    const failed = report.lastFailure.results.filter((result) => !result.ok);
     console.log(`  last failure: ${report.lastFailure.at}`);
-    for (const result of failed) console.log(`    ${result.profile}: ${result.summary}`);
+    console.log(`    ${report.lastFailure.profile}: ${report.lastFailure.summary}`);
+  }
+  if (report.legacyRecords) {
+    console.log(`  note: ${report.legacyRecords} older records from the single-file era are in`);
+    console.log(`        ${report.legacyHistory}, and are not counted above`);
   }
   for (const line of report.logTail) console.log(`  log: ${line}`);
 }
@@ -334,6 +372,7 @@ async function main() {
         notify: hasFlag("--notify"),
         json: hasFlag("--json"),
         record: hasFlag("--record"),
+        profileName: getFlag("--profile"),
       });
       return;
     }

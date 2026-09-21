@@ -1,5 +1,5 @@
 import { spawnSync } from "child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 
 /**
@@ -30,8 +30,58 @@ export function logPath() {
   return join(home(), "Library", "Logs", "devo-auth-status.log");
 }
 
-export function historyPath() {
+export function historyDir() {
+  return join(home(), ".devo", "auth-status");
+}
+
+/**
+ * One file per profile, with the path derived from the profile -- the same rule
+ * CLOUDSDK_CONFIG follows.
+ *
+ * The history used to be a single global JSONL for every identity, which is the
+ * mistake the isolated roots exist to remove: two devo processes working on two
+ * profiles held the same path. Append-only made that survivable rather than
+ * fatal -- measured on this filesystem, 200 concurrent appends produced 200
+ * intact lines -- but survivable is not isolated, and the file could not answer
+ * the question the history is kept for at all: which identity was a run about.
+ */
+export function historyPath(profileName) {
+  return join(historyDir(), `${profileName}.jsonl`);
+}
+
+/** The profile whose records predate the split, kept so nothing is lost silently. */
+export function legacyHistoryPath() {
   return join(home(), ".devo", "auth-status.jsonl");
+}
+
+export function historyProfiles() {
+  try {
+    return readdirSync(historyDir())
+      .filter((entry) => entry.endsWith(".jsonl"))
+      .map((entry) => entry.slice(0, -".jsonl".length))
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+/** Every profile's records, oldest first. */
+export function readHistory({ limit = 500 } = {}) {
+  const records = [];
+
+  for (const profile of historyProfiles()) {
+    for (const line of readFileSync(historyPath(profile), "utf8").split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        records.push(JSON.parse(line));
+      } catch {
+        // One torn line is dropped rather than fatal: the history is a
+        // diagnostic, and a single bad line must not hide the rest of it.
+      }
+    }
+  }
+
+  return records.sort((a, b) => String(a.at).localeCompare(String(b.at))).slice(-limit);
 }
 
 function xmlEscape(value) {
@@ -100,14 +150,14 @@ function bootstrap() {
 export function installWatch({ intervalSeconds = WATCH_INTERVAL_SECONDS } = {}) {
   mkdirSync(launchAgentsDir(), { recursive: true });
   mkdirSync(dirname(logPath()), { recursive: true });
-  mkdirSync(dirname(historyPath()), { recursive: true });
+  mkdirSync(historyDir(), { recursive: true });
   writeFileSync(plistPath(), renderPlist({ intervalSeconds }), "utf8");
 
   const loaded = bootstrap();
   return {
     plist: plistPath(),
     log: logPath(),
-    history: historyPath(),
+    history: historyDir(),
     intervalSeconds,
     loaded: loaded.ok,
     error: loaded.error,
@@ -145,32 +195,28 @@ export function watchStatus() {
   const plist = plistPath();
   const exists = existsSync(plist);
   if (!exists) {
-    return { installed: false, loaded: false, plist, log: logPath(), history: historyPath() };
+    return { installed: false, loaded: false, plist, log: logPath(), history: historyDir() };
   }
 
   const printed = launchctl(["print", `${domainTarget()}/${WATCH_LABEL}`]);
-  const runs = tailLines(historyPath(), 200)
-    .map((line) => {
-      try {
-        return JSON.parse(line);
-      } catch {
-        return null;
-      }
-    })
-    .filter(Boolean);
-  const failures = runs.filter((run) => run.results?.some((result) => !result.ok));
+  const records = readHistory();
+  const failures = records.filter((record) => record.ok !== true);
+  const legacy = existsSync(legacyHistoryPath()) ? tailLines(legacyHistoryPath(), 500).length : 0;
 
   return {
     installed: true,
     loaded: printed.ok,
     plist,
     log: logPath(),
-    history: historyPath(),
+    history: historyDir(),
     intervalSeconds: readIntervalSeconds(),
-    runs: runs.length,
+    runs: records.length,
     failures: failures.length,
-    lastRun: runs.at(-1) || null,
+    lastRun: records.at(-1) || null,
     lastFailure: failures.at(-1) || null,
+    // A count that silently dropped would read as "the failures went away".
+    legacyRecords: legacy,
+    legacyHistory: legacyHistoryPath(),
     logTail: tailLines(logPath(), 5),
   };
 }
