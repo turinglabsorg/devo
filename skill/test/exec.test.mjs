@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -16,10 +16,11 @@ const root = mkdtempSync(join(tmpdir(), "devo-exec-"));
 after(() => rmSync(root, { recursive: true, force: true }));
 mkdirSync(join(root, "master"), { recursive: true });
 
-function run(args, env = {}) {
+function run(args, env = {}, spawnOptions = {}) {
   return spawnSync("node", [CLI, ...args], {
     encoding: "utf8",
     env: { ...process.env, DEVO_GCLOUD_PROFILES_DIR: root, ...env },
+    ...spawnOptions,
   });
 }
 
@@ -27,6 +28,18 @@ function run(args, env = {}) {
  *  what it was given without a second tool in the loop. */
 function printEnv(name) {
   return ["--", "node", "-e", `process.stdout.write(process.env.${name} || "")`];
+}
+
+/** A `gcloud` that is not gcloud, first on PATH: it records that it was started
+ *  and with which arguments. The suite starts no cloud command, and it must stay
+ *  that way even if the refusal it is testing regresses -- without this, a guard
+ *  that stopped refusing would run the real program. The record is also what
+ *  makes "the refusal came first" measurable instead of claimed. */
+function stubGcloud() {
+  const bin = mkdtempSync(join(tmpdir(), "devo-exec-stub-"));
+  const recorded = join(bin, "argv");
+  writeFileSync(join(bin, "gcloud"), `#!/bin/sh\nprintf '%s\\n' "$*" > ${recorded}\n`, { mode: 0o755 });
+  return { recorded, env: { PATH: `${bin}:${process.env.PATH}` } };
 }
 
 test("refuses to run without a --profile", () => {
@@ -251,9 +264,11 @@ test("does not inspect a shell wrapper that runs gcloud itself (residual)", () =
 });
 
 // Prefixing a call with `devo exec` must not side-step the router's guard: a
-// mutation reached through this route is still a mutation.
+// mutation reached through this route is still a mutation. The stub is there for
+// the day the refusal is not: nothing this suite starts may be a real gcloud.
 test("keeps the router's mutation guard", () => {
-  const result = run(["exec", "--profile", "master", "--", "gcloud", "auth", "login", "someone@example.com"]);
+  const { env } = stubGcloud();
+  const result = run(["exec", "--profile", "master", "--", "gcloud", "auth", "login", "someone@example.com"], env);
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /Refusing a mutating gcloud command/);
@@ -264,10 +279,25 @@ test("keeps the router's mutation guard", () => {
 // happens before anything is started, so the path does not have to exist for the
 // rule to be exercised.
 test("keeps the router's mutation guard for gcloud reached by a path", () => {
-  const result = run(["exec", "--profile", "master", "--", "/usr/local/bin/gcloud", "auth", "login", "someone@example.com"]);
+  const { env } = stubGcloud();
+  const result = run(["exec", "--profile", "master", "--", "/usr/local/bin/gcloud", "auth", "login", "someone@example.com"], env);
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /Refusing a mutating gcloud command/);
+});
+
+// The command word is the program it names, and on this filesystem another case
+// is the same program: `Gcloud` is gcloud, so a mutation reached through the route
+// under that spelling is the mutation it is. The second assertion is the stub's
+// record: a refusal that happened after the program ran would be no refusal, and
+// the route this batch replaced leaves that record behind.
+test("keeps the router's mutation guard for another case of the command word", () => {
+  const { recorded, env } = stubGcloud();
+  const result = run(["exec", "--profile", "master", "--", "Gcloud", "auth", "login", "someone@example.com"], env);
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Refusing a mutating gcloud command/);
+  assert.equal(existsSync(recorded), false, "the refusal must come before anything is started");
 });
 
 // CLOUDSDK_CONFIG is where gcloud looks for its own ADC; it is not where a client
@@ -311,6 +341,28 @@ test("reports a profile with no application-default credentials instead of refus
   assert.equal(result.status, 0, result.stderr);
 });
 
+// The other direction of the same variable: a profile with no ADC of its own has
+// nothing to name, and a value inherited from the calling shell is another
+// identity's credentials arriving at a child this route has just pinned -- so it
+// is removed rather than passed on. The child is asked for it by a name built from
+// two halves, because an argument that spells the variable is refused by the
+// route, which is the previous test.
+test("removes an inherited application-default credentials variable", () => {
+  const ask = [
+    "--",
+    "node",
+    "-e",
+    'const name = "GOOGLE_" + "APPLICATION_CREDENTIALS"; process.stdout.write(process.env[name] || "")',
+  ];
+  const result = run(["exec", "--profile", "master", ...ask], {
+    GOOGLE_APPLICATION_CREDENTIALS: join(root, "inherited-adc.json"),
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "", "the child must not inherit another identity's credentials file");
+  assert.match(result.stderr, /no application-default credentials of its own/);
+});
+
 // A shell cannot be asked for one variable by name when that name is identity
 // material -- the route refuses the argument that spells it, which is the point of
 // the refusal -- so the environment is judged where it is built.
@@ -325,6 +377,41 @@ test("propagates the exit status of the command", () => {
   const result = run(["exec", "--profile", "master", "--", "sh", "-c", "exit 7"]);
 
   assert.equal(result.status, 7, "the caller must see the failure of what it started");
+});
+
+// The fourth credential store, judged by the name it carries wherever it is
+// written. This path is not a root and holds nothing, so nothing about it can be
+// resolved to one -- and that is the case the spelling is for: a store named where
+// no root is (another user's home, a store with no file behind it yet) has no
+// directory to be resolved to, and the route this batch replaced passed it on.
+test("refuses an argument naming the legacy credential store", () => {
+  const result = run([
+    "exec",
+    "--profile",
+    "master",
+    "--",
+    "true",
+    "/tmp/devo-exec-store/legacy_credentials/someone@example.com/adc.json",
+  ]);
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Refusing to pass on/);
+});
+
+// The command word is a name looked up on PATH, and PATH is not the working
+// directory: resolving `true` against the directory the caller is in refused any
+// command run from inside a root, where the lookup never looks. The second call is
+// the control that keeps that exemption narrow -- a command word written as a path
+// (`./nope`) is a path and is judged as one, which is true of the route this batch
+// replaced too, so it measures nothing and says so here.
+test("does not resolve a separator-less command word against the working directory", () => {
+  const inside = join(root, "master");
+  const bare = run(["exec", "--profile", "master", "--", "true"], {}, { cwd: inside });
+  const written = run(["exec", "--profile", "master", "--", "./nope"], {}, { cwd: inside });
+
+  assert.equal(bare.status, 0, bare.stderr);
+  assert.equal(written.status, 1, "a command word written as a path is still judged");
+  assert.match(written.stderr, /Refusing to pass on/);
 });
 
 // A root whose active account is not the one the registry expects is the drift

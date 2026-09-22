@@ -15,18 +15,22 @@
 #
 # A copy off this disk leaves the root as surely as a mount leaves the machine,
 # and a copy is what gets committed by accident, so the copying tools are judged
-# with the mount. And nothing here rests on spelling: a verb is read as the tool
-# it names (`/bin/cp`, `\cp`, another case), a root is recognised both as a path
-# and as the variable that can point at one, a pin is read as the value it names
-# rather than as a word to be dropped, quotes are removed before anything is
-# matched because they are how a path with a space in it is written, and the
-# compose file is read because it hides a mount from the command line -- from the
-# directory Compose itself would use, which is the one a `cd` on the same line
-# changes. What these rules cannot see is recorded as a residual test in
+# with the mount. And nothing here rests on spelling: the text is first read the way
+# the shell reads it, so a verb is the tool it names (`/bin/cp`, `\cp`, `c\p`,
+# another case) and a root is the directory it denotes (`~/.config//gcloud`,
+# `~/.config/./gcloud`, `gclou\d`), a root is recognised both as a path and as the
+# variable that can point at one, a pin is read as the value it names rather than as
+# a word to be dropped, and the compose file is read because it hides a mount from
+# the command line -- from the directory Compose itself would use, which is the one
+# a `cd` on the same line changes. A `cd` whose target the shell builds (`$VAR`) is
+# not a directory this text can read, and a compose call after one is refused rather
+# than passed: the file that would be read is the one thing the rule cannot see.
+# What these rules still cannot see is recorded as a residual test in
 # test/gcloud-guard.test.mjs rather than claimed here: a root the shell builds out
 # of parts this text does not contain (a glob, a brace, a command substitution over
 # a directory that is not itself a root), a compose file pulled in by `include:`,
-# and a copying tool that is not on the list.
+# a copying tool that is not on the list, and a root under a
+# DEVO_GCLOUD_PROFILES_DIR other than the one this workstation keeps.
 #
 # Reads the hook payload on stdin. Exit 2 blocks the call and returns the
 # message on stderr.
@@ -49,11 +53,18 @@ GCLOUD_PATH='([.]config/gcloud|GOOGLE_APPLICATION_CREDENTIALS[=/]|CLOUDSDK_CONFI
 # the root. A copy leaves the protected root just as a mount leaves the machine,
 # and a copy is what ends up committed by accident.
 TRANSFER_VERB='(docker|docker-compose|podman|nerdctl|colima|limactl|vagrant|kubectl|ssh|scp|rsync|cp|mv|tar|zip)'
-# What may stand in front of the verb without changing which tool is called: an
-# escape (`\cp`, the alias-bypassing spelling) and a directory (`/bin/cp`,
-# `/usr/local/bin/rsync`). A transfer verb is judged as the tool it names, not as
-# the word it is written with.
-TRANSFER_WORD='(^|[[:space:];|&(])\\?([^[:space:];|&]*/)?'
+# What may stand in front of the verb without changing which tool is called: a
+# directory (`/bin/cp`, `/usr/local/bin/rsync`). A transfer verb is judged as the
+# tool it names, not as the word it is written with; the escapes that used to be
+# named here are removed from the text before it is matched at all.
+TRANSFER_WORD='(^|[[:space:];|&(])([^[:space:];|&]*/)?'
+# A run of global flags, each optionally followed by the value it takes:
+# `--project <id>`, `--verbosity debug`, `-q`. It stands in front of the
+# subcommand of a gcloud call and in front of `compose`, and both rules used to
+# read only the one-token spelling (`--project=<id>`): the two-token spelling,
+# which is how the flag is normally written, was a call neither of them saw.
+FLAGS='([[:space:]]+-[^[:space:]]+([[:space:]]+[^-][^[:space:]]*)?)*'
+
 
 deny() {
   printf 'BLOCKED by gcloud-guard: %s\n' "$1" >&2
@@ -75,14 +86,40 @@ deny_transfer() {
   exit 2
 }
 
-# What the shell hands the tool is not what the line looks like. Quotes are how a
-# path with a space in it is written, and a root written that way is the same
-# root: removing them is what lets the rules below read `-v "<root>":/gc`,
-# `-f "compose.yaml"` and `cat "<root>/credentials.db"` as the names they are.
-# Removed from the line the rules read, not from the line itself -- nothing else
-# about the text is rewritten, because escapes and expansions belong to the shell
-# and a guard that claimed to follow them would only look like one that does.
-readable=$(printf '%s' "$command" | tr -d '\042\047')
+# What the shell hands the tool is not what the line looks like, and the rules below
+# all read the same rewritten text. Three differences are removed here, each because
+# it was a way past a rule that reads spelling:
+#
+# Quotes, because they are how a path with a space in it is written and a root
+# written that way is the same root: removing them is what lets the rules read
+# `-v "<root>":/gc`, `-f "compose.yaml"` and `cat "<root>/credentials.db"` as the
+# names they are.
+#
+# A backslash before a newline, which the shell removes without separating the
+# words: `gcloud \` on one line and `  auth login` on the next is one command, and
+# read line by line it was two -- the call the unprefixed rule exists for, written
+# across two lines, passed. The same removal is why the sanctioned bootstrap in
+# references/gcp.md, whose pin is on its first line and whose gcloud word is on its
+# second, was *refused*: the pin was dropped from one line and the call judged on
+# the next. Joining them first answers both readings, which were wrong the same way.
+# Only an odd run of backslashes joins: two of them are one escaped backslash, and
+# the newline after it still ends the command, so a word ending in `\\` keeps the
+# boundary a rule needs before a verb.
+#
+# And a backslash inside a word, which the shell removes the same way: it is what
+# makes `c\p` the tool `cp`, `gclou\d` the word `gcloud`, and `~/.config//gcloud`,
+# `~/.config/./gcloud` the one directory `.config/gcloud` denotes -- the shell does
+# not collapse those, the kernel does, and every rule here knows the root by name.
+#
+# Nothing else about the text is rewritten: expansions and globs belong to the
+# shell, and a guard that claimed to follow them would only look like one that does.
+readable=$(printf '%s' "$command" \
+  | awk '{ n = 0; i = length($0)
+           while (i > 0 && substr($0, i, 1) == "\\") { n++; i-- }
+           if (n % 2 == 1) { sub(/\\$/, ""); printf "%s", $0; next }
+           print }' \
+  | tr -d '\042\047' \
+  | sed -E -e 's/\\//g' -e 's#//+#/#g' -e 's#/\./#/#g')
 
 # A compose file hides the mount from the command line, so the file itself is
 # read. Judged before the gcloud trigger below, because `docker compose up -d`
@@ -91,9 +128,12 @@ readable=$(printf '%s' "$command" | tr -d '\042\047')
 # The call is matched the way the rest of this file matches spelling: the tool is
 # judged by the name it carries, and a run of whitespace is a run of whitespace,
 # so `docker  compose`, a tab and another case are all the call being made -- each
-# of them reaches the same CLI and reads the same file.
-if printf '%s' "$readable" | grep -qiE '(^|[^[:alnum:]_-])(docker|podman|nerdctl)[[:space:]]+compose([[:space:]]|$)' \
-  || printf '%s' "$readable" | grep -qiE '(^|[^[:alnum:]_-])docker-compose([[:space:]]|$)'; then
+# of them reaches the same CLI and reads the same file. So is the run of flags a
+# caller puts between them (`docker --context <ctx> compose up`), and so is the
+# hyphenated sibling of each tool: `docker-compose`, `podman-compose` and
+# `nerdctl-compose` are the same program under another name.
+if printf '%s' "$readable" | grep -qiE "(^|[^[:alnum:]_-])(docker|podman|nerdctl)${FLAGS}[[:space:]]+compose([[:space:]]|\$)" \
+  || printf '%s' "$readable" | grep -qiE '(^|[^[:alnum:]_-])(docker|podman|nerdctl)-compose([[:space:]]|$)'; then
   compose_files=$(printf '%s' "$readable" | tr ' =' '\n\n' | grep -E '\.ya?ml$' || true)
 
   # Which directory Compose would read from. The working directory is where it
@@ -102,17 +142,40 @@ if printf '%s' "$readable" | grep -qiE '(^|[^[:alnum:]_-])(docker|podman|nerdctl
   # hostile && docker compose up` mount the root one directory away from the
   # check. A shell cannot be followed line by line by a text rule, so every
   # directory the line changes to is tried as well -- reading a file Compose would
-  # not reach can only add a refusal, never a pass.
+  # not reach can only add a refusal, never a pass. A `cd` after the call is read
+  # with the rest of them, for the same reason: the rule reads the line, not the
+  # order the shell reaches it in.
   if [ -z "$compose_files" ]; then
-    bases=${cwd:-.}
-    for directory in $(printf '%s' "$readable" | tr ';|&(' '\n\n\n\n' \
-      | sed -nE 's/^[[:space:]]*cd[[:space:]]+([^[:space:];|&]+).*/\1/p'); do
+    # The targets in the order the line writes them, with the spellings a target may
+    # carry: `command cd` calls the same builtin, and `--`, `-L` and `-P` are what it
+    # accepts before the directory.
+    targets=$(printf '%s' "$readable" | tr ';|&(' '\n\n\n\n' \
+      | sed -nE 's/^[[:space:]]*(command[[:space:]]+)?cd[[:space:]]+/cd /p' \
+      | sed -E 's/^cd[[:space:]]+(-[LP]+[[:space:]]+|--[[:space:]]+)*/cd /' \
+      | sed -nE 's/^cd[[:space:]]+([^[:space:];|&]+).*/\1/p')
+
+    # Each target is resolved against the directory the line is in when it reaches
+    # it, which for the second `cd` is where the first left it: `cd /a && cd b`
+    # reads /a/b, and resolving `b` against the working directory looked one
+    # directory away from the compose file that matters.
+    last=${cwd:-.}
+    bases=$last
+    for directory in $targets; do
       case "$directory" in
-        /*) bases="$bases
-$directory" ;;
-        *) bases="$bases
-${cwd:-.}/$directory" ;;
+        *'$'*|*'`'*|*'*'*|*'?'*|*'['*)
+          # The shell builds this one, so which directory the call ends up in is
+          # exactly what this rule cannot read, and the file it would read is the
+          # mount the rule exists to see. An unreadable target is refused instead of
+          # passed, and it is the target that is refused: a compose call whose
+          # directory can be read is judged as before.
+          deny_transfer "the directory this line changes to (cd $directory) is built by the shell, so the compose file it would read cannot be determined. Write the path, or run the call from that directory."
+          ;;
+        '~'*) last=${HOME:-$last}${directory#'~'} ;;
+        /*) last=$directory ;;
+        *) last=$last/$directory ;;
       esac
+      bases="$bases
+$last"
     done
 
     # Compose walks up from where it runs: measured on v2.36, a call in a
@@ -204,20 +267,28 @@ pinned=$(printf '%s' "$readable" | tr ';|&(' '\n\n\n\n' \
 # A transfer verb plus a root path: the directory leaves the root -- into a
 # container, onto another host, or into a copy on this disk -- without gcloud
 # being called at all. The verb is read with whatever leads up to it, because a
-# path or an escape in front of the name is the same tool being called
-# (`/bin/cp`, `\cp`); and both halves are matched without regard to case, since
-# the same directory answers to both cases on this filesystem.
+# directory in front of the name is the same tool being called (`/bin/cp`,
+# `/usr/local/bin/rsync`); the escapes that used to be judged here (`\cp`, `c\p`)
+# are removed from the text before it is read at all, from the same line that
+# removes them for the paths. And both halves are matched without regard to case,
+# since the same directory answers to both cases on this filesystem.
 if printf '%s' "$judged" | grep -qiE "${TRANSFER_WORD}${TRANSFER_VERB}[[:space:]]"; then
   if printf '%s' "$judged" | grep -qiE "$GCLOUD_PATH"; then
     deny_transfer "this hands a gcloud identity root to a container, to another host, or to a copy outside the root."
   fi
 
+  # The value is judged as the path it is, word by word, and not as a substring of
+  # the line: `master` was a match inside `master-old`, and the ambient root was a
+  # match inside the profiles directory beside it -- two refusals about a path
+  # nobody handed over, neither of them a root named again.
   for value in $pinned; do
-    case "$judged" in
-      *"$value"*)
-        deny_transfer "this pins $value for a local process and then names the same root to a container, to another host, or to a copy outside it."
-        ;;
-    esac
+    for word in $(printf '%s' "$judged" | tr -s ' \t;|&()=:' '\n'); do
+      case "$word" in
+        "$value"|"$value"/*)
+          deny_transfer "this pins $value for a local process and then names the same root to a container, to another host, or to a copy outside it."
+          ;;
+      esac
+    done
   done
 fi
 
@@ -229,20 +300,28 @@ fi
 # trailing comment -- which is not a pin of anything.
 #
 # The call is read as gcloud plus its subcommand, with the global flags a caller
-# may put between them: `gcloud -q auth login` writes the ambient root exactly as
-# `gcloud auth login` does, and a flag in between is not a different call.
+# may put between them and the value each of those flags takes: `gcloud -q auth
+# login` and `gcloud --project <id> auth login` write the ambient root exactly as
+# `gcloud auth login` does, and a flag in between is not a different call. Reading
+# only the one-token form of a flag (`--project=<id>`) left the two-token form --
+# how the flag is normally written -- as a call this rule could not see.
 # `activate-service-account` and `config set account` are on the list because they
 # write into that root too: the first stores a credential in it, the second changes
 # which identity an unprefixed call will silently use.
 unprefixed=$(printf '%s' "$readable" | tr ';|&(' '\n\n\n\n' \
   | sed -E '/^[[:space:]]*CLOUDSDK_CONFIG=/d' \
-  | grep -iE 'gcloud([[:space:]]+-[^[:space:]]+)*[[:space:]]+(auth[[:space:]]+(login|application-default|activate-service-account)|config[[:space:]]+(configurations[[:space:]]+activate|set[[:space:]]+account))' || true)
+  | grep -iE "gcloud${FLAGS}[[:space:]]+(auth[[:space:]]+(login|application-default|activate-service-account)|config[[:space:]]+(configurations[[:space:]]+activate|set[[:space:]]+account))" || true)
 
 if [ -n "$unprefixed" ]; then
   deny "gcloud authentication/configuration command without CLOUDSDK_CONFIG:
   $unprefixed"
 fi
 
+# A store read is judged last, after the trigger above -- and it is still reached
+# on its own, because that trigger's list names the stores as well: a line that
+# reads one carries the same spellings the trigger looks for. Judged here rather
+# than before it because a store is judged by its name alone, with no call to
+# read: `cat <store>` is the whole command.
 if printf '%s' "$readable" | grep -qiE '(access_tokens\.db|credentials\.db|application_default_credentials\.json|legacy_credentials)'; then
   deny "reading or copying a gcloud credential store is never allowed."
 fi

@@ -10,6 +10,28 @@ import { after, test } from "node:test";
 // version of the compose-file branch aborted under `set -e` and turned a deny
 // into a silent pass-through, and the docker bind below passed the guard
 // untouched for as long as the guard only looked at gcloud invocations.
+//
+// Two kinds of case here measure nothing by themselves, and they are written so
+// that they read as what they are rather than as cover:
+//
+//  - an allowance (`expected: 0`), including the shapes a rule has to keep out of
+//    its own way -- the same tool called on a path that is not a root, the same
+//    flag in front of a subcommand that is not one of the denied ones. A rule that
+//    refuses everything is not a fix, so these are load-bearing; they are still
+//    green under the guard a new rule replaces, so they are evidence about the
+//    rules that were there before it, not about the new one;
+//  - a residual, named as one in the test title, for behaviour this guard
+//    deliberately does not judge. It is green under both guards by construction:
+//    it records a limit, and a limit is not measured by a tree that has the fix.
+//
+// What a batch of new rules is measured by is the rest: the cases that are red
+// under the guard being replaced and green under this one. The measurement is the
+// new test file run from a `git archive` of the previous commit -- which carries
+// the previous guard -- so a case that changes verdict for a reason no rule claims
+// shows up as a difference in the other direction. Measured that way, the six
+// blocks of spelling rules below leave 30 cases red under the commit that preceded
+// them, every one of them inside those blocks, and no case that predates them
+// changed verdict: a rule added must not lose one it already had.
 const HOOK = join(import.meta.dirname, "..", "hooks", "gcloud-guard.sh");
 
 // Strings only; the guard judges the text of a command, and these are the
@@ -270,6 +292,13 @@ test("records the spellings the shell builds out of parts (residuals)", async (t
     { expected: 0, command: `cp -R $HOME/.config/{gcloud-profiles}/master /tmp/master-copy` },
     { expected: 0, command: `cp -R $(ls -d $HOME/.config/*-profiles/master) /tmp/master-copy` },
     { expected: 0, command: `docker compose up -d`, cwd: included },
+    // A relocation of the whole tree, which only the process that sets it knows:
+    // the guard judges the text of a command, and a root under a
+    // DEVO_GCLOUD_PROFILES_DIR other than this workstation's carries none of the
+    // letters the pattern knows. The roots this workstation keeps are under the
+    // default path, and those are matched -- `.config/gcloud` is a prefix of
+    // `.config/gcloud-profiles`, so a copy of any profile root is refused.
+    { expected: 0, command: "DEVO_GCLOUD_PROFILES_DIR=/tmp/profiles cp -R /tmp/profiles/master /tmp/master-copy" },
   ];
   for (const item of cases) await check(t, item);
 });
@@ -407,6 +436,136 @@ test("reads the compose file of a directory the line changes to", async (t) => {
   await check(t, { expected: 2, command: "cd ../with-root && docker compose up -d", cwd: cleanProject });
   await check(t, { expected: 2, command: `cd ${withRoot} && docker compose up -d`, cwd: noCompose });
   await check(t, { expected: 0, command: `cd ${cleanProject} && docker compose up -d`, cwd: noCompose });
+});
+
+// A backslash before a newline is removed by the shell, and the words it joins are
+// one command: `gcloud \` on one line and `  auth login` on the next writes the
+// ambient root exactly as the one-line spelling does. Read line by line, the rule
+// never saw the call -- and the sanctioned bootstrap in references/gcp.md, whose
+// pin is on its first line and whose gcloud word is on its second, was *refused*
+// for the same reason. Only an odd run of backslashes joins: two are one escaped
+// backslash and the newline after them still ends the command.
+test("reads a command the shell continued onto the next line as the one command it is", async (t) => {
+  const cases = [
+    { expected: 2, command: "gcloud \\\n  auth login someone@example.com" },
+    { expected: 2, command: "gcloud auth \\\n  activate-service-account --key-file=/tmp/key.json" },
+    { expected: 2, command: "gcloud config \\\n  set account someone.else@example.com" },
+    { expected: 2, command: "gcloud \\\n  config configurations activate ragusa" },
+    { expected: 2, command: "docker \\\n  compose up -d", cwd: withRoot },
+    // The documented bootstrap, and the same spelling with the pin relocated: the
+    // pin opens the logical line the call is on, so the call is the pinned one.
+    { expected: 0, command: `CLOUDSDK_CONFIG=${PROFILES}/master \\\n  gcloud auth login sebastiano.cataudo@gmail.com` },
+    { expected: 0, command: "CLOUDSDK_CONFIG=/tmp/root \\\n  gcloud config set account someone@example.com" },
+    // Already refused before the join, and still refused: the copy is a separate
+    // command here, so the verb keeps the boundary a rule needs in front of it.
+    { expected: 2, command: `cp -R \\\n  ${GCLOUD} /tmp/gc-copy` },
+    { expected: 2, command: `x\\\\\ncp -R ${GCLOUD} /tmp/gc-copy` },
+  ];
+  for (const item of cases) await check(t, item);
+});
+
+// A backslash inside a word is removed by the shell like any other escape, and so
+// are the redundant separators and dot segments a kernel collapses: `c\p` is the
+// tool `cp`, `gclou\d` is the word `gcloud`, and `~/.config//gcloud` and
+// `~/.config/./gcloud` are the one directory `.config/gcloud` denotes. Each of
+// these reached the same root as the canonical spelling and passed the guard.
+test("reads a verb and a root by what the shell hands over, not by how they are written", async (t) => {
+  const cases = [
+    { expected: 2, command: `c\\p -R ${GCLOUD} /tmp/gc-copy` },
+    { expected: 2, command: `t\\ar -C ${PROFILES}/master -cf /tmp/gc.tar .` },
+    { expected: 2, command: `rsyn\\c -a ${GCLOUD}/ /tmp/gc-copy` },
+    { expected: 2, command: `m\\v ${GCLOUD} /tmp/gc-copy` },
+    { expected: 2, command: `cp -R ${homedir()}/.config//gcloud /tmp/gc-copy` },
+    { expected: 2, command: `cp -R ${homedir()}/.config/./gcloud /tmp/gc-copy` },
+    { expected: 2, command: `cp -R ${homedir()}/.config/gclou\\d /tmp/gc-copy` },
+    { expected: 2, command: `docker run -v ${homedir()}/.config//gcloud:/gc img` },
+    // The normalisation is the shell's, not a licence to refuse anything with a
+    // backslash or a second slash in it.
+    { expected: 0, command: "cp -R /tmp/data /tmp/backup" },
+    { expected: 0, command: "docker run -v /tmp/data:/data img" },
+  ];
+  for (const item of cases) await check(t, item);
+});
+
+// A global flag may take its value as the next word, and that is how it is normally
+// written: `gcloud --project <id> auth login` writes the ambient root exactly as
+// the plain spelling does, and the rule's run of flags read only the joined
+// spelling (`--project=<id>`), so the flag's value stopped the match one token
+// short of the subcommand.
+test("reads the value of a global flag, not only the joined spelling", async (t) => {
+  const cases = [
+    { expected: 2, command: "gcloud --project inbound-pattern-489808-h0 auth login someone@example.com" },
+    { expected: 2, command: "gcloud --verbosity debug auth login someone@example.com" },
+    { expected: 2, command: "gcloud --project inbound-pattern-489808-h0 auth application-default login" },
+    { expected: 2, command: "gcloud --account someone@example.com config set account someone.else@example.com" },
+    { expected: 2, command: "gcloud --project=inbound-pattern-489808-h0 auth login someone@example.com" },
+    // A flag and its value in front of a subcommand that is not one of these is
+    // still an ordinary call, including when the value is the word `auth`.
+    { expected: 0, command: "gcloud --project inbound-pattern-489808-h0 projects list" },
+    { expected: 0, command: "gcloud --project auth auth list" },
+  ];
+  for (const item of cases) await check(t, item);
+});
+
+// `docker --context <ctx> compose up` is the normal way to point Compose at another
+// daemon: the flag stands between the tool and the subcommand, the CLI is the same
+// one and the file it reads is the same file. Each front-end has its hyphenated
+// sibling too, and a call inside a container is not this file's to read.
+test("reads a compose call with a flag in front of it, and any hyphenated front-end", async (t) => {
+  const cases = [
+    { expected: 2, command: "docker --context default compose up -d", cwd: withRoot },
+    { expected: 2, command: `docker -H ${DOCKER_SOCK} compose up -d`, cwd: withRoot },
+    { expected: 2, command: "podman-compose up -d", cwd: withRoot },
+    { expected: 2, command: "nerdctl-compose up -d", cwd: withRoot },
+    { expected: 0, command: "docker --context default compose up -d", cwd: cleanProject },
+    { expected: 0, command: "docker --context default ps" },
+    { expected: 0, command: "docker exec worker compose up -d", cwd: withRoot },
+  ];
+  for (const item of cases) await check(t, item);
+});
+
+// Each `cd` target is resolved against the directory the line is in when it reaches
+// it, which for the second `cd` is where the first one left it: `cd a && cd b`
+// reads a/b, and resolving every target against the payload's working directory
+// looked one directory away from the compose file that matters. A target the shell
+// builds is the one thing the rule cannot read, and a compose call after one is
+// refused rather than passed -- unless the file is named, in which case the
+// directory never had to be found.
+test("resolves each cd against the directory the previous one reached", async (t) => {
+  const cases = [
+    { expected: 2, command: `cd ${root} && cd with-root && docker compose up -d`, cwd: noCompose },
+    { expected: 2, command: "cd .. && cd with-root && docker compose up -d", cwd: cleanProject },
+    { expected: 2, command: `cd -- ${withRoot} && docker compose up -d`, cwd: noCompose },
+    { expected: 2, command: `cd -P ${withRoot} && docker compose up -d`, cwd: noCompose },
+    { expected: 2, command: `command cd ${withRoot} && docker compose up -d`, cwd: noCompose },
+    { expected: 2, command: `cd -L .. && cd with-root && docker compose up -d`, cwd: cleanProject },
+    { expected: 0, command: `cd ${cleanProject} && docker compose up -d`, cwd: noCompose },
+    { expected: 0, command: `cd ${homedir()}/no-such-dir-devo && docker compose up -d`, cwd: noCompose },
+  ];
+  for (const item of cases) await check(t, item);
+
+  // The directory is built by the shell, so the file that would be read cannot be
+  // determined: refused, with the reason named rather than a root.
+  const built = guard("cd $PROJ_ROOT && docker compose up -d", cleanProject);
+  assert.equal(built.status, 2, built.stderr);
+  assert.match(built.stderr, /built by the shell/, "the refusal must name why it could not read the directory");
+  await check(t, { expected: 0, command: `cd $PROJ_ROOT && docker compose -f ${join(cleanProject, "compose.yaml")} up -d`, cwd: noCompose });
+});
+
+// A pinned root named again as an argument is a root handed over, and it is judged
+// as the path it is: `master` inside `master-old` is a different path, and the
+// substring match refused a copy that named no root at all.
+test("compares a pinned root as the path it names, not as a substring of the line", async (t) => {
+  const cases = [
+    { expected: 0, command: "CLOUDSDK_CONFIG=/tmp/root cp -R /tmp/root2 /tmp/backup" },
+    { expected: 2, command: "CLOUDSDK_CONFIG=/tmp/root cp -R /tmp/root /tmp/backup" },
+    { expected: 2, command: "CLOUDSDK_CONFIG=/tmp/root cp -R /tmp/root/sub /tmp/backup" },
+    { expected: 2, command: "CLOUDSDK_CONFIG=/tmp/root docker run -v /tmp/root:/gc img" },
+    // A path that *is* a root directory stays refused, and by the root rule rather
+    // than by the pin: the pin comparison is a second rule, not the only one.
+    { expected: 2, command: `CLOUDSDK_CONFIG=${PROFILES}/master cp -R ${PROFILES}/master-old /tmp/backup` },
+  ];
+  for (const item of cases) await check(t, item);
 });
 
 // A socket mount is a second route to the same place: whoever holds the socket

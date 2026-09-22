@@ -92,16 +92,27 @@ else
   # Every file of a copied tree, at any depth. A tree is copied whole, so a file
   # added anywhere in it is a copy this install writes; recording only the first
   # level left the deeper ones editable in place with nothing to compare them to.
-  # Read with `find` into this shell rather than through a pipe, because a loop on
-  # the far side of a pipe cannot add to the manifest the first entry starts.
+  # The list is read into this shell and fed to the loop, because a loop on the
+  # far side of a pipe runs in a subshell and cannot add to the manifest the first
+  # entry starts. It is not `done < <(find ...)`, which is the same thing in bash
+  # alone: started as `sh install.sh` -- a spelling this file has to survive,
+  # because that syntax error is reached *after* the copies are written and before
+  # the manifest is, leaving fresh copies beside the previous manifest, which is
+  # the divergence the manifest is recorded to make visible.
+  #
+  # A path holding a newline or a backslash is not read correctly by this
+  # line-based loop. The tree is the installer's own files, which have neither.
   record_tree() {
     target=$1
     area=$2
     installed_dir=$3
+    files="$(find "$SCRIPT_DIR/$area" -type f | LC_ALL=C sort)"
     while IFS= read -r file; do
       rel="${file#"$SCRIPT_DIR/$area/"}"
       record "$target" "skill/$area/$rel" "$installed_dir/$rel"
-    done < <(find "$SCRIPT_DIR/$area" -type f | LC_ALL=C sort)
+    done <<FILES
+$files
+FILES
   }
 
   {

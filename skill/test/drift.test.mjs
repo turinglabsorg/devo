@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -165,6 +165,43 @@ test("fails when the copies are there and the manifest is not", () => {
   assert.match(list[0].error, /nothing records what was written into it/);
   assert.match(list[0].error, /run skill\/install\.sh/);
   assert.match(list[0].error, /tools[/\\]devo/, "every copy it found is named");
+});
+
+// Every kind of copy an install writes is evidence that one is there, including
+// the two it writes rather than copies -- the CLI wrapper outside CODEX_HOME and
+// the configuration example under the config directory. Scanning only the trees
+// left a machine with the wrapper and nothing else to be reported as "devo is not
+// installed here", which is the state a deleted manifest has to be caught in: the
+// check must name the copy it found, whatever kind it is. Each kind is exercised
+// on its own, so dropping one from the scan turns this test red.
+//
+// It is a control for the batch it travels with, and it says so because that is
+// what it is: the scan already read all five kinds before this batch, so the case
+// is green on both trees and measures nothing the batch changes. What it measures
+// is a scan narrowed later -- which is the mistake it was written after.
+test("names an unrecorded copy of every kind, not only a runtime tree", () => {
+  const kinds = [
+    ["the CLI wrapper", [".local", "bin", "devo"]],
+    ["the configuration example", [".devo", "config.example.json"]],
+  ];
+  for (const [kind, parts] of kinds) {
+    const root = join(sandbox, "unrecorded", kind.replace(/\W+/g, "-"));
+    const home = join(root, "home");
+    const copy = write(join(home, ...parts), "a copy with nothing recording it");
+    const list = checks({
+      HOME: home,
+      CODEX_HOME: join(home, ".codex"),
+      DEVO_BIN_DIR: join(home, ".local", "bin"),
+      DEVO_HOOK_DIR: join(root, "hooks"),
+      DEVO_INSTALL_MANIFEST: join(home, ".codex", "tools", "devo", "INSTALLED.json"),
+    });
+
+    assert.equal(list.length, 1, `${kind} is one check`);
+    assert.equal(list[0].skipped, undefined, `${kind} on disk is never "nothing installed"`);
+    assert.equal(list[0].ok, false, `${kind} with nothing recording it is a failure`);
+    assert.match(list[0].error, new RegExp(copy.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `${kind} is named`);
+    assert.match(list[0].error, /run skill\/install\.sh/, `${kind} comes with the remedy`);
+  }
 });
 
 // A manifest that records nothing verifies nothing, and the header line alone
@@ -355,4 +392,161 @@ test("reports a manifest header that is not a string instead of failing on it", 
   assert.equal(list.length, 1);
   assert.equal(list[0].ok, false);
   assert.match(list[0].error, /repo is not a string/);
+});
+
+// `path` is the field every failure line names, and `unreadable` is the reason a
+// read is reported as failed -- both are the check's own fields, not the
+// manifest's to set. Read by spreading the file over them, a manifest wrote the
+// report: it could state that it was unreadable, and an object in either field
+// took the whole provider down with "Cannot convert object to primitive value"
+// instead of being reported as the defect it is.
+test("reads its own two fields as its own, not the manifest's", () => {
+  install();
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+
+  write(manifestPath, JSON.stringify({ ...manifest, repo: 5, path: { toString: "spoofed" } }, null, 2));
+  const malformed = checks();
+  assert.equal(malformed.length, 1);
+  assert.equal(malformed[0].ok, false);
+  assert.match(malformed[0].error, /repo is not a string/);
+  assert.match(malformed[0].error, /INSTALLED\.json/, "the line names the manifest, not what the manifest said");
+  assert.doesNotMatch(malformed[0].error, /spoofed/);
+
+  // A readable manifest declaring itself unreadable is a manifest being
+  // described by a field it set, so the copies are compared as they are.
+  write(manifestPath, JSON.stringify({ ...manifest, unreadable: { toString: "spoofed" } }, null, 2));
+  const list = checks();
+  const header = find(list, "install manifest");
+  assert.ok(header, "a readable manifest is read, whatever it claims about itself");
+  assert.equal(header.ok, true, header.error);
+  const hook = find(list, "hook copy (claude/hooks)");
+  assert.equal(hook.ok, true, hook.error);
+});
+
+// A manifest that records fewer copies than are installed is a manifest with the
+// one entry that would have held a copy left out of it, and the copy on disk is
+// what tells that apart from an install that writes none of that kind. Nothing of
+// another kind is recorded either, so the state being tested is the hook's alone:
+// the copy is there, and the manifest has stopped saying so.
+test("fails on a manifest that records fewer copies than are installed", () => {
+  install();
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  write(
+    manifestPath,
+    JSON.stringify({ ...manifest, artifacts: manifest.artifacts.filter((a) => a.target !== "hook") }, null, 2),
+  );
+  const check = find(checks(), "hook copy (claude/hooks)");
+
+  assert.ok(check, "the kind of copy the install writes is still named");
+  assert.equal(check.ok, false);
+  assert.equal(check.skipped, undefined, "a copy that is on disk is not a check that could not be made");
+  assert.match(check.summary, /nothing records it/);
+  assert.match(check.error, /gcloud-guard\.sh is installed, but the manifest records no hook copy/);
+  assert.match(check.error, /run skill\/install\.sh/);
+});
+
+// An absolute path is not yet the copy it is recorded as: it has to be the path
+// that kind of copy is installed at. Spelled through `..` it reached the
+// repository source -- which is the file whose digest was recorded, because the
+// source is what the digest was taken from -- while the installed copy was a
+// different file, and the entry was reported as matching.
+test("fails on an absolute path that reaches something other than the copy it records", () => {
+  const { guardSource, guardInstalled } = install();
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  // From the hook directory up to the sandbox, then into the repository.
+  const elsewhere = `${hooks}/../../../repo/skill/hooks/gcloud-guard.sh`;
+  assert.equal(sha(elsewhere), sha(guardSource), "the spelling reaches the repository source");
+  writeFileSync(guardInstalled, "guard edited in place");
+  assert.notEqual(sha(guardInstalled), sha(guardSource), "and that is not the copy that is installed");
+
+  write(
+    manifestPath,
+    JSON.stringify(
+      {
+        ...manifest,
+        artifacts: manifest.artifacts.map((a) => (a.target === "hook" ? { ...a, installed: elsewhere } : a)),
+      },
+      null,
+      2,
+    ),
+  );
+  const check = find(checks(), "hook copy (claude/hooks)");
+
+  assert.equal(check.ok, false, "a path that is not where the copy is installed is not a comparison");
+  assert.match(check.error, /is not where a hook copy is installed/);
+  assert.match(check.error, /reinstall/);
+  assert.doesNotMatch(check.error, /was changed after it was installed/);
+});
+
+// The installer writes a regular file, so a link at that path is a copy that is
+// not there. Read through the link the digest is the target's, so a symlink into
+// the repository source was digested as the installed copy and reported as
+// matching -- an install whose real copy is gone, reported as intact.
+test("reports a symlink at the installed path instead of digesting what it points at", (t) => {
+  const { guardSource, guardInstalled } = install();
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  rmSync(guardInstalled);
+  symlinkSync(guardSource, guardInstalled);
+  // The fixture is put back: the next install() writes a file at that path, and a
+  // link left there would have it write through to the repository source.
+  t.after(() => rmSync(guardInstalled, { force: true }));
+  assert.equal(readFileSync(guardInstalled, "utf8"), readFileSync(guardSource, "utf8"), "the link reads as the source");
+
+  write(
+    manifestPath,
+    JSON.stringify(
+      {
+        ...manifest,
+        artifacts: manifest.artifacts.map((a) =>
+          a.target === "hook" ? { ...a, installed: guardInstalled, sha256: sha(guardSource) } : a,
+        ),
+      },
+      null,
+      2,
+    ),
+  );
+  const check = find(checks(), "hook copy (claude/hooks)");
+
+  assert.equal(check.ok, false);
+  assert.match(check.error, /gcloud-guard\.sh is not a regular file/);
+  assert.doesNotMatch(check.error, /was changed after it was installed/);
+});
+
+// A directory at the installed path is named as what is there. Asked whether the
+// path is a file, a directory answers no -- and the check read that as "missing",
+// which is a different state with a different remedy.
+test("reports a directory at the installed path as not a regular file, not as missing", (t) => {
+  const { guardInstalled } = install();
+  rmSync(guardInstalled);
+  mkdirSync(guardInstalled);
+  t.after(() => rmSync(guardInstalled, { recursive: true, force: true }));
+  const check = find(checks(), "hook copy (claude/hooks)");
+
+  assert.equal(check.ok, false);
+  assert.match(check.error, /gcloud-guard\.sh is not a regular file/);
+  assert.doesNotMatch(check.error, /is missing/);
+});
+
+// An install writes files into the directories it creates, so an empty one is a
+// directory and not an install. Read as the evidence of one it reports a copy
+// that is not there -- a failure the check invented, on a machine where nothing
+// was installed at that path.
+test("does not read an empty directory as an installed copy", () => {
+  install();
+  const empty = join(sandbox, "home", ".codex", "skills", "devo");
+  mkdirSync(empty, { recursive: true });
+
+  const recorded = find(checks(), "skill copies (skills/devo)");
+  assert.equal(recorded.ok, false, "a copy that is not there is not a check that was made");
+  assert.equal(recorded.skipped, true);
+  assert.match(recorded.summary, /no skill copy is recorded/);
+
+  // The same rule where the manifest is the thing that is gone: what is there is
+  // what a manifest is missing for, and an empty directory is not among it.
+  rmSync(manifestPath);
+  const unrecorded = checks();
+  assert.equal(unrecorded.length, 1);
+  assert.equal(unrecorded[0].ok, false);
+  assert.match(unrecorded[0].error, /tools[/\\]devo/);
+  assert.doesNotMatch(unrecorded[0].error, /skills[/\\]devo/);
 });

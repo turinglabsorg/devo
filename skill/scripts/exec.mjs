@@ -32,6 +32,11 @@ const IDENTITY_MATERIAL = [
   "GOOGLE_APPLICATION_CREDENTIALS",
   "credentials.db",
   "access_tokens.db",
+  // The fourth store, beside the three above and for the reason all four are
+  // here: named where no root is -- a path in another user's home, a store with
+  // no file behind it yet -- it has no directory to be resolved to, so the name
+  // it carries is judged wherever it is written.
+  "legacy_credentials",
   ADC_FILE,
 ];
 
@@ -142,10 +147,18 @@ function pathsIn(argument) {
   return [argument, ...argument.split(/[:=,]/)].filter(Boolean);
 }
 
-function namesIdentityMaterial(argument, roots) {
+function namesIdentityMaterial(argument, roots, { commandWord = false } = {}) {
   if (IDENTITY_MATERIAL.some((spelling) => argument.includes(spelling))) return true;
 
-  return pathsIn(argument).some((candidate) =>
+  // The command word is a name looked up on PATH unless it is written as a path,
+  // and PATH is not the working directory: resolving `ls` against the directory
+  // the caller happens to be in refused any command run from inside a root, where
+  // the lookup never looks. A command word that carries a separator (`./ls`,
+  // `/bin/gcloud`) is a path, and one written as a path is still judged as one.
+  const written = commandWord && !argument.includes("/") && !argument.startsWith("~");
+  const candidates = written ? [] : pathsIn(argument);
+
+  return candidates.some((candidate) =>
     READINGS.some((reading) => denotesRoot(reading(candidate), roots)),
   );
 }
@@ -185,6 +198,11 @@ function denotesRoot(path, roots) {
  *
  * Returned rather than written, so the environment can be judged without starting
  * a process and without an argument that names the variable.
+ *
+ * The variable is the route's to decide in both directions: named from the
+ * profile's own file when there is one, and removed when there is not, because a
+ * value inherited from the calling shell is another identity's credentials
+ * arriving at a child this route has just pinned.
  */
 export function pinnedEnv(profile, { projectId, account } = {}) {
   const env = profileEnv(profile);
@@ -199,10 +217,20 @@ export function pinnedEnv(profile, { projectId, account } = {}) {
     return { env, warning: "" };
   }
 
+  // Nothing of the profile's own to name, so the variable is removed rather than
+  // left as this shell found it: an inherited GOOGLE_APPLICATION_CREDENTIALS
+  // would reach the child while the route reports the profile as pinned, and the
+  // child would authenticate as whatever identity the caller's environment
+  // happened to carry -- the mix-up between two clients this route exists to
+  // prevent. With it removed, a child that resolves ADC by that variable finds
+  // none, and one that resolves the well-known file reads the ambient root's,
+  // which is what the warning says.
+  delete env.GOOGLE_APPLICATION_CREDENTIALS;
+
   return {
     env,
     warning:
-      `note: profile ${profile.name} has no application-default credentials of its own, so a child that resolves ADC by the well-known file reads the ambient root's. Set them with:\n` +
+      `note: profile ${profile.name} has no application-default credentials of its own, so a child that resolves ADC by the well-known file reads the ambient root's, and any GOOGLE_APPLICATION_CREDENTIALS this shell carried is removed rather than passed on. Set them with:\n` +
       `  CLOUDSDK_CONFIG=${profile.root} gcloud auth application-default login ${account || "<account>"}\n`,
   };
 }
@@ -236,11 +264,13 @@ export function runExec({ profileName, projectId, account, allowMutation, args }
   // --allow-mutation. The command word is read as the tool it names, the way the
   // harness guard reads a transfer verb, so a directory in front of the name
   // (`/usr/bin/gcloud`, `/opt/homebrew/bin/gcloud`) is the same program being
-  // started. What is read is the gcloud call the route was asked to start, not one
-  // a shell wrapper runs on its own -- a shell string has no end, and a text test
-  // that pretended to follow it would only look like a boundary.
+  // started, and so is another case of it on this filesystem, where `Gcloud` and
+  // `GCLOUD` are the same file: reading the case would have made the letter a way
+  // around the guard. What is read is the gcloud call the route was asked to
+  // start, not one a shell wrapper runs on its own -- a shell string has no end,
+  // and a text test that pretended to follow it would only look like a boundary.
   // `skill/test/exec.test.mjs` records that boundary as a residual.
-  if (basename(args[0]) === "gcloud") guardMutation(args.slice(1), { allowMutation });
+  if (basename(args[0]).toLowerCase() === "gcloud") guardMutation(args.slice(1), { allowMutation });
 
   assertProjectAllowed(profile, projectId);
 
@@ -253,7 +283,11 @@ export function runExec({ profileName, projectId, account, allowMutation, args }
   }
 
   const roots = identityRoots();
-  const named = args.filter((argument) => namesIdentityMaterial(argument, roots));
+  // Every argument but the command word is judged as a path, because any of them
+  // can be one; the command word is judged as one only when it is written as one.
+  const named = args.filter((argument, index) =>
+    namesIdentityMaterial(argument, roots, { commandWord: index === 0 }),
+  );
   if (named.length) {
     throw new Error(
       `Refusing to pass on ${named.join(", ")}: this route pins one profile root for the command it starts and never hands a root to anything else.\n` +

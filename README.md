@@ -44,6 +44,8 @@ devo/
     ├── index.js                 CLI entry point
     ├── install.sh               Installer for Codex skill + CLI
     ├── package.json
+    ├── hooks/
+    │   └── gcloud-guard.sh      PreToolUse guard on Bash calls
     ├── references/
     │   ├── aws.md
     │   ├── costs.md
@@ -51,8 +53,15 @@ devo/
     │   ├── gcp.md
     │   ├── logs.md
     │   └── tenants.md
-    └── scripts/
-        └── doctor.mjs           Tool/auth/tenant readiness checks
+    ├── scripts/
+    │   ├── ambient.mjs          Ambient identity purge
+    │   ├── doctor.mjs           Tool/auth/tenant readiness checks
+    │   ├── drift.mjs            Installed-copy check behind `doctor --provider install`
+    │   ├── exec.mjs             Profile-pinned route for a non-gcloud process
+    │   ├── gcloud.mjs           Profile-aware gcloud router
+    │   ├── profiles.mjs         Profile registry
+    │   └── watch.mjs            Hourly launchd auth-status watchdog
+    └── test/                    Node test suites for the above
 ```
 
 Future scheduled audits, notification bridges, or long-running collectors should live under a future `devo/agent/` boundary. The current version is intentionally interactive and command-driven.

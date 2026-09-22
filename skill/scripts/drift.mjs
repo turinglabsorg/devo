@@ -1,7 +1,7 @@
 import { spawnSync } from "child_process";
 import { createHash } from "crypto";
-import { existsSync, readFileSync, statSync } from "fs";
-import { isAbsolute, join } from "path";
+import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from "fs";
+import { isAbsolute, join, sep } from "path";
 
 /**
  * The copies install.sh wrote, and whether they are still the copies it wrote.
@@ -44,26 +44,70 @@ function labelFor(target) {
 }
 
 /**
- * The copies an install writes, whether or not a manifest records them. Read
- * only when there is no manifest, and read because of what the absence would
- * otherwise mean: the manifest is the one file that can be deleted to make this
- * check disappear, and a deletion is a commoner accident than an edit. What an
- * install leaves behind is the evidence that one is there.
+ * Where install.sh writes each kind of copy, derived from the same environment
+ * the installer honours rather than from the manifest. It answers two questions
+ * the manifest cannot be trusted to answer: whether a kind it records nothing of
+ * is nevertheless on disk, and whether an entry recorded at some other path is
+ * describing the copy it says it is.
  *
  * All five kinds, not the three trees: an install also writes the CLI wrapper and
  * the configuration example, and leaving them out meant a machine whose wrapper
  * was still in place could be reported as having nothing installed -- the state a
  * deleted manifest is supposed to be caught in.
  */
-function installedCopies() {
+function targetDirs() {
   const home = process.env.HOME || "";
-  return [
-    join(codexHome(), "tools", "devo"),
-    join(codexHome(), "skills", "devo"),
-    join(process.env.DEVO_HOOK_DIR || join(home, ".claude", "hooks"), "gcloud-guard.sh"),
-    join(process.env.DEVO_BIN_DIR || join(home, ".local", "bin"), "devo"),
-    join(home, ".devo", "config.example.json"),
-  ];
+  return new Map([
+    ["runtime", join(codexHome(), "tools", "devo")],
+    ["skill", join(codexHome(), "skills", "devo")],
+    ["hook", process.env.DEVO_HOOK_DIR || join(home, ".claude", "hooks")],
+    ["wrapper", process.env.DEVO_BIN_DIR || join(home, ".local", "bin")],
+    ["config", join(home, ".devo")],
+  ]);
+}
+
+/** The single-file copies an install writes, by name inside their directory. The
+ *  rest are trees, whose copy is the directory itself. */
+const SINGLE_FILE = new Map([
+  ["hook", "gcloud-guard.sh"],
+  ["wrapper", "devo"],
+  ["config", "config.example.json"],
+]);
+
+/** The copy an install writes for each kind, resolved once so the walk that looks
+ *  for copies and the walk that judges recorded paths cannot disagree. */
+function copyLocations() {
+  const dirs = targetDirs();
+  return new Map(
+    [...dirs].map(([kind, dir]) => [kind, SINGLE_FILE.has(kind) ? join(dir, SINGLE_FILE.get(kind)) : dir]),
+  );
+}
+
+/** Whether a copy of this kind is on disk. A tree has to hold something: an
+ *  install writes files into the directories it creates, so an empty one is a
+ *  directory and not an install -- read as the evidence of one it reports a copy
+ *  that is not there, and a machine that only ever ran `mkdir -p` would be
+ *  reported as an install that records nothing. What cannot be listed is
+ *  reported: the reason is not known, and this check does not answer "nothing"
+ *  for a state it could not read. */
+function copyIsPresent(kind, location) {
+  if (!existsSync(location)) return false;
+  if (SINGLE_FILE.has(kind)) return true;
+  try {
+    return readdirSync(location).length > 0;
+  } catch {
+    return true;
+  }
+}
+
+/** The copies an install writes, whether or not a manifest records them, as
+ *  `[kind, path]` pairs because whether one is there is not a question about the
+ *  path alone. Read only when there is no manifest, and read because of what the
+ *  absence would otherwise mean: the manifest is the one file that can be deleted
+ *  to make this check disappear, and a deletion is a commoner accident than an
+ *  edit. What an install leaves behind is the evidence that one is there. */
+function installedCopies() {
+  return [...copyLocations()];
 }
 
 /** The digest of a file, or null when it cannot be read. A copy that exists and
@@ -86,6 +130,34 @@ function isFile(path) {
   }
 }
 
+/** A copy install.sh wrote is a regular file. `statSync` follows a link, so a
+ *  symlink to the repository source was digested as if it were the installed
+ *  copy and reported as matching -- a state the installer never writes, and one
+ *  that hides an install where the real copy is gone. */
+function isRegularFile(path) {
+  try {
+    return lstatSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** Whether a recorded path names the copy it is recorded as. Derived from where
+ *  install.sh writes that kind, not from the entry: a path that is absolute but
+ *  spelled through `..` reached the repository source, so the entry was digested
+ *  against the source -- which is exactly the digest recorded -- while the
+ *  installed copy was something else entirely, and the check reported the
+ *  install as matching.
+ *
+ *  A recorded path that is relative is a different state, reported as one: it
+ *  names a different file in every directory the doctor might run in. */
+function namesItsOwnCopy(recorded, kind) {
+  const dir = targetDirs().get(kind);
+  if (!dir) return true;
+  if (recorded.split(sep).includes("..")) return false;
+  return recorded.startsWith(dir + sep) || recorded === dir;
+}
+
 export function readManifest() {
   const path = manifestPath();
   if (!existsSync(path)) return null;
@@ -96,7 +168,22 @@ export function readManifest() {
     return { path, unreadable: "not a regular file" };
   }
   try {
-    return { path, ...JSON.parse(readFileSync(path, "utf8")) };
+    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    // The record is read field by field, and never spread over the two fields
+    // this function owns. A manifest carrying its own `path` or `unreadable`
+    // wrote the report: `path` is what every failure line names, and
+    // `unreadable` is the reason the file could not be read, so a manifest that
+    // sets either one states a condition instead of being described by it --
+    // and an object there took the whole provider down with
+    // "Cannot convert object to primitive value" instead of being reported.
+    const record = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    return {
+      path,
+      installedAt: record.installedAt,
+      repo: record.repo,
+      repoCommit: record.repoCommit,
+      artifacts: record.artifacts,
+    };
   } catch (error) {
     return { path, unreadable: error.message };
   }
@@ -159,16 +246,31 @@ function copyChecks(manifest, parsed) {
     const entries = parsed.groups.get(target) || [];
 
     if (entries.length === 0) {
-      // Nothing of this kind is recorded, so there is nothing to compare -- a
-      // check that could not be made, which is never a pass. It is not a failure
-      // either: an install that writes no copy of this kind has nothing to
-      // diverge from.
-      checks.push({
-        name: label,
-        ok: false,
-        skipped: true,
-        summary: `no ${target} copy is recorded in the manifest`,
-      });
+      // Nothing of this kind is recorded. Two states hide behind that sentence,
+      // and they are opposites: an install that writes no copy of this kind has
+      // nothing to compare with, which is a check that could not be made; an
+      // install that writes one and does not record it has a copy that nothing
+      // holds to what was installed -- and the entry that would have held it is
+      // the entry someone dropped. The copy on disk is what tells them apart.
+      const location = copyLocations().get(target);
+      if (location && copyIsPresent(target, location)) {
+        checks.push({
+          name: label,
+          ok: false,
+          summary: `a ${target} copy is installed and nothing records it`,
+          error: [
+            `${location} is installed, but the manifest records no ${target} copy: a manifest that records fewer copies than were written is a way to silence this check`,
+            `run skill/install.sh: it records every copy it writes`,
+          ].join("\n       "),
+        });
+      } else {
+        checks.push({
+          name: label,
+          ok: false,
+          skipped: true,
+          summary: `no ${target} copy is recorded in the manifest`,
+        });
+      }
       continue;
     }
 
@@ -177,6 +279,8 @@ function copyChecks(manifest, parsed) {
     const missing = [];
     const unreadable = [];
     const relative = [];
+    const elsewhere = [];
+    const notAFile = [];
 
     for (const artifact of entries) {
       // A path recorded relative to nothing is not a path this check can resolve:
@@ -188,8 +292,21 @@ function copyChecks(manifest, parsed) {
         continue;
       }
 
-      if (!isFile(artifact.installed)) {
+      // An absolute path is not yet the copy it is recorded as: it has to be the
+      // path this kind is installed at. Judged before the file is read, because
+      // reading it is how an entry that names something else passed.
+      if (!namesItsOwnCopy(artifact.installed, target)) {
+        elsewhere.push(artifact.installed);
+        continue;
+      }
+
+      if (!existsSync(artifact.installed)) {
         missing.push(artifact.installed);
+        continue;
+      }
+
+      if (!isRegularFile(artifact.installed)) {
+        notAFile.push(artifact.installed);
         continue;
       }
 
@@ -214,7 +331,8 @@ function copyChecks(manifest, parsed) {
       }
     }
 
-    const differing = diverged.length + missing.length + unreadable.length + relative.length;
+    const differing =
+      diverged.length + missing.length + unreadable.length + relative.length + elsewhere.length + notAFile.length;
     const ok = differing === 0;
     checks.push({
       name: label,
@@ -230,10 +348,17 @@ function copyChecks(manifest, parsed) {
         : [
             ...diverged.map((path) => `${path} was changed after it was installed`),
             ...missing.map((path) => `${path} is missing`),
+            ...notAFile.map(
+              (path) => `${path} is not a regular file, so it is not the copy the installer writes`,
+            ),
             ...unreadable.map((path) => `${path} is there but could not be read, so it was not compared`),
             ...relative.map(
               (path) =>
                 `${path} is recorded as a relative path, which names a different file in every directory: reinstall`,
+            ),
+            ...elsewhere.map(
+              (path) =>
+                `${path} is not where a ${target} copy is installed, so it is not the copy this entry records: reinstall`,
             ),
             `edit the repository copy and reinstall: an installed copy is never the source`,
           ].join("\n       "),
@@ -247,7 +372,9 @@ export function installChecks() {
   const manifest = readManifest();
 
   if (!manifest) {
-    const present = installedCopies().filter((path) => existsSync(path));
+    const present = installedCopies()
+      .filter(([kind, path]) => copyIsPresent(kind, path))
+      .map(([, path]) => path);
 
     // Nothing installed and nothing recorded is the one state where there is no
     // check to make: devo is not on this machine, and saying "ok" would claim a
