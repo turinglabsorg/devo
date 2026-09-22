@@ -93,6 +93,17 @@ test("the hook sits where a PreToolUse hook can run it", () => {
   assert.equal(spawnSync("sh", ["-n", HOOK]).status, 0, "the hook must parse");
 });
 
+test("reads the command from either hook payload shape", () => {
+  const payload = JSON.stringify({
+    toolName: "run_terminal_command",
+    cwd: root,
+    toolInput: { command: "gcloud projects list" },
+  });
+  const result = spawnSync(HOOK, { input: payload, encoding: "utf8" });
+  assert.equal(result.status, 2, result.stderr);
+  assert.match(result.stderr, /BLOCKED by gcloud-guard/);
+});
+
 test("refuses handing an identity root to a container or to another host", async (t) => {
   const cases = [
     { expected: 2, command: `docker run -v ${GCLOUD}:/root/gc img bash` },

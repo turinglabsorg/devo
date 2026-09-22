@@ -37,7 +37,7 @@
 set -eu
 
 payload=$(cat)
-command=$(printf '%s' "$payload" | jq -r '.tool_input.command // ""')
+command=$(printf '%s' "$payload" | jq -r '.tool_input.command // .toolInput.command // ""')
 cwd=$(printf '%s' "$payload" | jq -r '.cwd // ""')
 
 [ -n "$command" ] || exit 0
