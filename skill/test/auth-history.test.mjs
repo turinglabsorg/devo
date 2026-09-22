@@ -41,9 +41,16 @@ function scenario(name) {
   const home = join(root, name, "home");
   const profiles = join(root, name, "profiles");
   mkdirSync(home, { recursive: true });
-  for (const profile of ["master", "credilex"]) {
+  for (const profile of ["master", "acme"]) {
     mkdirSync(join(profiles, profile), { recursive: true });
   }
+  // Declared locally, for the same reason the registry stays generic: an
+  // identity that belongs to an organisation is a local fact, and a repository
+  // read by anyone is not where it goes.
+  writeFileSync(
+    join(profiles, "profiles.local.json"),
+    JSON.stringify({ acme: { account: "human@acme.example", healthProject: "acme-staging" } }),
+  );
   return { home, profiles };
 }
 
@@ -54,6 +61,7 @@ function run(scn, args) {
       ...process.env,
       HOME: scn.home,
       DEVO_GCLOUD_PROFILES_DIR: scn.profiles,
+      DEVO_GCLOUD_LOCK_DIR: join(scn.home, "locks"),
       PATH: `${bin}:${process.env.PATH}`,
     },
   });
@@ -73,11 +81,11 @@ test("writes each profile into its own file", () => {
   assert.equal(run(scn, ["auth", "status", "--record"]).status, 1, "a failing probe must exit non-zero");
 
   const master = records(scn, "master");
-  const credilex = records(scn, "credilex");
+  const acme = records(scn, "acme");
   assert.equal(master.length, 1);
-  assert.equal(credilex.length, 1);
+  assert.equal(acme.length, 1);
   assert.equal(master[0].profile, "master");
-  assert.equal(credilex[0].profile, "credilex");
+  assert.equal(acme[0].profile, "acme");
   assert.equal(master[0].stale, true, "the refusal text must still be read as a stale credential");
   assert.equal(
     existsSync(join(scn.home, ".devo", "auth-status.jsonl")),
@@ -92,14 +100,14 @@ test("a run scoped to one profile cannot touch another profile's file", () => {
   assert.equal(run(scn, ["auth", "status", "--profile", "master", "--record"]).status, 1);
   assert.equal(records(scn, "master").length, 1);
   assert.equal(
-    records(scn, "credilex"),
+    records(scn, "acme"),
     null,
     "the other identity's file must not even be created by a scoped run",
   );
 
-  assert.equal(run(scn, ["auth", "status", "--profile", "credilex", "--record"]).status, 1);
+  assert.equal(run(scn, ["auth", "status", "--profile", "acme", "--record"]).status, 1);
   assert.equal(records(scn, "master").length, 1, "the first identity's file must be untouched");
-  assert.equal(records(scn, "credilex").length, 1);
+  assert.equal(records(scn, "acme").length, 1);
 });
 
 test("refuses a profile it cannot probe instead of reporting an empty success", () => {
@@ -126,11 +134,11 @@ test("reads the records back across profiles, oldest first", () => {
     assert.equal(all.length, 2);
     assert.deepEqual(
       all.map((record) => record.profile).sort(),
-      ["credilex", "master"],
+      ["acme", "master"],
     );
     assert.ok(all[0].at <= all[1].at, "records must come back in time order");
     assert.equal(historyPath("master").endsWith(join("auth-status", "master.jsonl")), true);
-    assert.notEqual(historyPath("master"), historyPath("credilex"));
+    assert.notEqual(historyPath("master"), historyPath("acme"));
     assert.throws(() => historyPath(), /needs a profile name/, "a nameless path would be undefined.jsonl");
   } finally {
     process.env.HOME = previous;

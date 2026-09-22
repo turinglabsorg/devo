@@ -232,7 +232,7 @@ test("refuses an account that is not an address, so it cannot climb out of the r
 test("refuses --profile: a profile root is not this command's scope", () => {
   const root = scenario();
 
-  const result = run(root, ["auth", "purge", "--profile", "credilex", LEAKED]);
+  const result = run(root, ["auth", "purge", "--profile", "acme", LEAKED]);
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /takes no --profile/);

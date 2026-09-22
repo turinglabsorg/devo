@@ -1,5 +1,7 @@
 import { spawnSync } from "child_process";
 
+import { hushBin, secretPresence } from "./hush.mjs";
+import { spawnIsolatedGcloud, withProfileLock } from "./isolate.mjs";
 import {
   assertProjectAllowed,
   isStaleToken,
@@ -180,18 +182,11 @@ export function runGcloud({ profileName, projectId, account, allowMutation, tty,
     ? args
     : [...(projectId ? ["--project", projectId] : []), "--account", effectiveAccount, ...args];
 
-  const options = { env: profileEnv(profile) };
+  const result = tty
+    ? spawnIsolatedGcloud(profile, passthrough, { stdio: "inherit" })
+    : spawnIsolatedGcloud(profile, passthrough, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
 
-  if (tty) {
-    const result = spawnSync("gcloud", passthrough, { ...options, stdio: "inherit" });
-    return result.status ?? 1;
-  }
-
-  const result = spawnSync("gcloud", passthrough, {
-    ...options,
-    encoding: "utf8",
-    maxBuffer: 64 * 1024 * 1024,
-  });
+  if (tty) return result.status ?? 1;
 
   if (result.stdout) process.stdout.write(result.stdout);
   if (result.stderr) process.stderr.write(result.stderr);
@@ -203,6 +198,185 @@ export function runGcloud({ profileName, projectId, account, allowMutation, tty,
   }
 
   return result.status ?? 1;
+}
+
+/** The variable hush injects the key into. Named here so the script below and
+ *  the `--env` flag cannot drift apart. */
+export const SERVICE_ACCOUNT_KEY_VAR = "DEVO_SERVICE_ACCOUNT_KEY";
+
+/**
+ * The shell that turns the injected key into a credential this root holds, and
+ * then deletes the file it had to write.
+ *
+ * gcloud only reads a service account key from a path, so the value has to touch
+ * the disk for the length of one command. The file is created under `umask 077`
+ * in a mode-600 mktemp, and the trap removes it on every exit path -- including
+ * the one where gcloud fails. The command is deliberately not `exec`ed: exec
+ * replaces this shell, and the EXIT trap goes with it, which is exactly how a
+ * key file survives the command it was written for.
+ *
+ * Nothing here ever prints the value. hush injects it into the environment, the
+ * shell writes it to the file, gcloud reads the file, the file is removed. It
+ * does not pass through this process, its argv, or its output.
+ */
+const ACTIVATION_SCRIPT = [
+  "umask 077",
+  'key_file="$(mktemp "${TMPDIR:-/tmp}/devo-sa-key.XXXXXX")"',
+  'trap "rm -f $key_file" EXIT',
+  'printf %s "$DEVO_SERVICE_ACCOUNT_KEY" > "$key_file"',
+  'gcloud auth activate-service-account --key-file="$key_file"',
+].join("\n");
+
+/**
+ * Activates the profile's declared service account from the hush secret.
+ *
+ * The key is read by hush, not by this process: devo spawns `hush run`, which
+ * injects the value into the child environment and filters it out of the child's
+ * output. There is no code path here that receives the value.
+ */
+export function activateFromHush(name) {
+  const profile = requireProfile(name);
+
+  const keyName = profile.serviceAccount?.keyName;
+  if (!keyName) {
+    throw new Error(
+      `Profile ${profile.name} declares no serviceAccount.keyName, so there is no secret to activate from. Declare it in the devo registry first.`,
+    );
+  }
+
+  process.stderr.write(
+    `Activating profile ${profile.name} from hush secret ${keyName} (the value is never printed, and never reaches this process)\n`,
+  );
+
+  const result = withProfileLock(profile.name, () =>
+    spawnSync(
+      hushBin(),
+      ["run", "--name", keyName, "--env", SERVICE_ACCOUNT_KEY_VAR, "--redact", "--", "/bin/sh", "-c", ACTIVATION_SCRIPT],
+      // The root travels in the environment, so the `gcloud` inside the script
+      // writes into the profile and nowhere else -- same guarantee the guard gives
+      // every other call. The lock is the same one `devo gcloud` holds, so an
+      // activation cannot refresh the store while another call has it open.
+      { env: profileEnv(profile), stdio: "inherit" },
+    ),
+  );
+
+  if (result.error) {
+    process.stderr.write(`hush could not be started: ${result.error.message}\n`);
+    return 1;
+  }
+
+  return result.status ?? 1;
+}
+
+/**
+ * The sequence that creates the service account, for a human to run.
+ *
+ * Printed rather than executed, and that is deliberate: this branch needs the
+ * human credential, and it needs two facts about the client's project that decide
+ * whether a key can exist at all. Both are read-only checks, and neither has been
+ * made yet. Running the sequence blind would either fail halfway or -- worse, if
+ * the organisation forbids keys -- leave the impression that the identity is in
+ * place when nothing was created.
+ *
+ * `devo auth bootstrap` runs this only to say what to type; when the key is in
+ * the vault it activates instead, and when the vault cannot be read it refuses.
+ */
+function printCreateSequence(profile) {
+  const serviceAccount = profile.serviceAccount;
+  const accountId = serviceAccount.email.split("@")[0];
+  // The project the declaration names, which is not always the health project:
+  // an account lives in one project, and a health probe may well point at
+  // another. Falling back to the health project keeps a declaration that does
+  // not say where its account lives from printing nothing usable.
+  const project = serviceAccount.project || profile.healthProject || "<project>";
+
+  process.stderr.write(
+    [
+      `Profile ${profile.name} has no service account key in hush yet (${serviceAccount.keyName}), so there is nothing to activate.`,
+      "",
+      "Bootstrapping it needs the human credential one time. If that credential is dead, repair it first:",
+      `  devo auth repair ${profile.name}`,
+      "",
+      "Then, in the profile and only in the profile:",
+      "",
+      `  devo gcloud --profile ${profile.name} --project ${project} -- \\`,
+      `    iam service-accounts create ${accountId} --display-name="Devo read-only audit"`,
+      "",
+      `  devo gcloud --profile ${profile.name} --project ${project} -- \\`,
+      `    projects add-iam-policy-binding ${project} \\`,
+      `      --member="serviceAccount:${serviceAccount.email}" --role=roles/viewer`,
+      "",
+      // A service account lives in one project and is read in another: the
+      // health probe asks the health project for its description as this
+      // account, so a binding on the account's own project alone leaves the
+      // probe failing with a permission error that reads like a dead token.
+      ...(profile.healthProject && profile.healthProject !== project
+        ? [
+            `  devo gcloud --profile ${profile.name} --project ${profile.healthProject} -- \\`,
+            `    projects add-iam-policy-binding ${profile.healthProject} \\`,
+            `      --member="serviceAccount:${serviceAccount.email}" --role=roles/viewer`,
+            "",
+            `The second binding is not decoration: the health probe reads ${profile.healthProject} as this`,
+            "account, and without it every probe after the bootstrap reports a permission failure.",
+            "",
+          ]
+        : []),
+      `  devo gcloud --profile ${profile.name} --project ${project} -- \\`,
+      `    iam service-accounts keys create ./${accountId}.json --iam-account=${serviceAccount.email}`,
+      "",
+      "Two read-only checks decide whether that can work at all, and both come first:",
+      `  1. whether ${profile.account} may create service accounts and keys in ${project};`,
+      "  2. whether the organisation enforces constraints/iam.disableServiceAccountKeyCreation,",
+      "     which forbids keys outright and leaves only workload identity federation.",
+      "",
+      "Then hand the key to the vault by name. hush has no command that stores a value, so this",
+      "step is the human's: share the key through a channel that is not this one and put it in",
+      "hush as a file secret named:",
+      "",
+      `  ${serviceAccount.keyName}`,
+      "",
+      "and delete the downloaded key file. After that:",
+      "",
+      `  devo auth bootstrap ${profile.name}`,
+      "",
+      "activates it from the vault, and the human credential is never needed again -- it may die,",
+      "and the profile keeps working, because it no longer authenticates as the human.",
+      "",
+    ].join("\n"),
+  );
+}
+
+/**
+ * The flow the profile follows: look for the key in hush, use it if it is there,
+ * and say what to run if it is not.
+ *
+ * The three answers of `secretPresence` are kept apart on purpose. `present:
+ * null` -- the vault could not be read -- is a refusal, not a missing key: taking
+ * it for absent would start creating a second key over one that already exists,
+ * and the second key is the one nobody would know about.
+ */
+export function bootstrapProfile(name) {
+  const profile = requireProfile(name);
+
+  if (!profile.serviceAccount?.keyName) {
+    throw new Error(
+      `Profile ${profile.name} declares no serviceAccount, so there is nothing to bootstrap. A human-identity profile has no non-interactive form to fall back on.`,
+    );
+  }
+
+  const presence = secretPresence(profile.serviceAccount.keyName);
+  if (presence.present === null) {
+    throw new Error(
+      `Refusing to bootstrap ${profile.name}: could not tell whether ${profile.serviceAccount.keyName} is in the vault (${presence.error}). Creating a key over an existing one would leave two credentials where the registry expects one.`,
+    );
+  }
+
+  if (!presence.present) {
+    printCreateSequence(profile);
+    return 1;
+  }
+
+  return activateFromHush(profile.name);
 }
 
 /**
@@ -224,8 +398,7 @@ export function repairProfile(name) {
   }
 
   process.stderr.write(`Repairing profile ${profile.name}: CLOUDSDK_CONFIG=${profile.root}\n`);
-  const result = spawnSync("gcloud", ["auth", "login", profile.account], {
-    env: profileEnv(profile),
+  const result = spawnIsolatedGcloud(profile, ["auth", "login", profile.account], {
     stdio: "inherit",
   });
   return result.status ?? 1;

@@ -8,7 +8,7 @@ import { accountInRoot } from "./profiles.mjs";
  * Removing an identity from the shared ambient root.
  *
  * `gcloud auth login` without CLOUDSDK_CONFIG writes into ~/.config/gcloud --
- * the root every unprefixed call falls back to -- and that is how a Credilex
+ * the root every unprefixed call falls back to -- and that is how a client's
  * identity came to sit there next to four unrelated accounts. The obvious
  * remedy, `gcloud auth revoke`, is the wrong one: it asks Google to invalidate
  * the refresh token, which would also break the isolated profile that holds the

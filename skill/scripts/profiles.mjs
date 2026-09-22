@@ -1,6 +1,7 @@
-import { spawnSync } from "child_process";
 import { existsSync, readFileSync, readdirSync } from "fs";
 import { join, resolve } from "path";
+
+import { spawnIsolatedGcloud } from "./isolate.mjs";
 
 /**
  * Registry of the isolated gcloud identity roots.
@@ -8,7 +9,7 @@ import { join, resolve } from "path";
  * This workstation keeps one CLOUDSDK_CONFIG directory per identity instead of
  * named configurations inside a shared root. A process that forgets the prefix
  * does not fail: it silently uses the shared global config and the wrong
- * identity, which is how a Credilex call once ended up authenticated as an
+ * identity, which is how a client's call once ended up authenticated as an
  * unrelated account. Every gcloud invocation must therefore be derived from
  * this registry, never from the ambient environment.
  *
@@ -28,13 +29,79 @@ export const PROFILE_DEFINITIONS = {
     healthProject: null,
     projectPatterns: [],
   },
-  credilex: {
-    label: "Credilex GCP (gstaging, gprod)",
-    account: "seba@credilex.it",
-    healthProject: "credilex-gstaging",
-    projectPatterns: ["credilex-*", "linear-analyst-*"],
-  },
 };
+
+/**
+ * The per-profile declarations that are not this file's to make.
+ *
+ * A service account -- its address, its key, the vault name that key lives under
+ * -- is a fact about one organisation's project, and this registry is generic
+ * tooling that gets read by anyone. Names of a client's identities do not belong
+ * in it. They live next to the roots they describe, in
+ * `profiles.local.json` under the profiles directory: outside the repository,
+ * never committed, one file per workstation.
+ *
+ * The shape is the registry's own, so a local entry may override or add:
+ *
+ *   {
+ *     "<profile>": {
+ *       "account": "human@example.com",
+ *       "healthProject": "example-staging",
+ *       "projectPatterns": ["example-*"],
+ *       "serviceAccount": {
+ *         "email": "devo-audit@example-prod.iam.gserviceaccount.com",
+ *         "keyName": "EXAMPLE_PROD_SA_KEY",
+ *         "project": "example-prod"
+ *       }
+ *     }
+ *   }
+ *
+ * `serviceAccount.keyName` is a NAME, and never a value: what the key *is* stays
+ * in the vault, and reaches a process only through `hush run`.
+ *
+ * A local entry may not narrow the guard. `projectPatterns` are appended to the
+ * committed ones rather than replacing them, so no edit to a local file can make
+ * a project that was out of scope reachable -- an agent that forgot the profile
+ * prefix is the failure this registry exists to stop, and a local file that can
+ * widen scope would be a second way to make the same mistake.
+ */
+export function overlayDefinitions(dir = gcloudProfilesDir()) {
+  try {
+    const parsed = JSON.parse(readFileSync(join(dir, "profiles.local.json"), "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    // Absent or unreadable is the normal state on a workstation with no
+    // organisation-specific profiles: the committed registry is the whole story.
+    return {};
+  }
+}
+
+function mergedDefinition(name, committed, local) {
+  return {
+    label: `${name} (declared locally)`,
+    ...committed,
+    ...local,
+    projectPatterns: [...(committed.projectPatterns || []), ...(local.projectPatterns || [])],
+  };
+}
+
+/**
+ * The account a call in this profile will use.
+ *
+ * A bootstrapped profile calls as its service account, and an unbootstrapped one
+ * calls as the human -- decided by what the root is actually authenticated as
+ * rather than by a flag, so declaring a service account here cannot break a
+ * profile that has not been bootstrapped yet.
+ *
+ * This is not a weakening of the guard: the drift check still refuses any root
+ * whose active account is neither. It is the declaration that says which two
+ * accounts are the right ones.
+ */
+export function effectiveAccountOf(profile) {
+  const declared = profile.serviceAccount?.email;
+  if (declared && selectedAccountOf(profile).account === declared) return declared;
+  return profile.account;
+}
 
 export const PROFILE_FIELD = "gcloudProfile";
 export const LEGACY_PROFILE_FIELD = "gcloudConfiguration";
@@ -64,16 +131,19 @@ function rootsOnDisk() {
 }
 
 export function listProfiles() {
-  const declared = Object.entries(PROFILE_DEFINITIONS).map(([name, definition]) => ({
+  const local = overlayDefinitions();
+  const names = [...new Set([...Object.keys(PROFILE_DEFINITIONS), ...Object.keys(local)])];
+
+  const declared = names.map((name) => ({
     name,
-    ...definition,
+    ...mergedDefinition(name, PROFILE_DEFINITIONS[name] || {}, local[name] || {}),
     root: profileRoot(name),
     declared: true,
     rootExists: existsSync(profileRoot(name)),
   }));
 
   const undeclared = rootsOnDisk()
-    .filter((name) => !PROFILE_DEFINITIONS[name])
+    .filter((name) => !names.includes(name))
     .map((name) => ({
       name,
       label: "undeclared: no project guard, no health probe",
@@ -173,12 +243,23 @@ export function repairCommand(name) {
 const PROBE_TIMEOUT_MS = Number(process.env.DEVO_GCLOUD_PROBE_TIMEOUT_MS || 60000);
 
 function gcloudIn(profile, args) {
-  const result = spawnSync("gcloud", args, {
-    env: profileEnv(profile),
-    encoding: "utf8",
-    timeout: PROBE_TIMEOUT_MS,
-    maxBuffer: 1024 * 1024,
-  });
+  let result;
+  try {
+    result = spawnIsolatedGcloud(profile, args, {
+      encoding: "utf8",
+      timeout: PROBE_TIMEOUT_MS,
+      maxBuffer: 1024 * 1024,
+    });
+  } catch (error) {
+    return {
+      status: 1,
+      stdout: "",
+      stderr: error.message,
+      timedOut: false,
+      missing: false,
+      spawnError: error.message,
+    };
+  }
 
   return {
     status: result.status,
@@ -254,9 +335,13 @@ export function probeProfile(profile) {
     };
   }
 
+  // The effective account, not the declared human one: a profile bootstrapped
+  // onto a service account would otherwise be probed with an identity its root
+  // does not hold, and a working profile would be reported dead.
+  const account = effectiveAccountOf(profile);
   const probeArgs = [
     "--account",
-    profile.account,
+    account,
     "--project",
     profile.healthProject,
     "projects",
@@ -281,7 +366,7 @@ export function probeProfile(profile) {
       name: profile.name,
       ok: true,
       skipped: false,
-      summary: `${profile.account} -> ${profile.healthProject}`,
+      summary: `${account} -> ${profile.healthProject}`,
     };
   }
 
@@ -317,9 +402,9 @@ export function probeProfile(profile) {
     ok: false,
     skipped: false,
     stale,
-    summary: stale ? `stale credentials for ${profile.account}` : `probe failed for ${profile.healthProject}`,
+    summary: stale ? `stale credentials for ${account}` : `probe failed for ${profile.healthProject}`,
     error: stale
-      ? `the stored refresh token for ${profile.account} is no longer accepted by Google`
+      ? `the stored refresh token for ${account} is no longer accepted by Google`
       : stderr.split("\n").slice(-2).join(" ").slice(0, 300) || result.spawnError || "no output from gcloud",
     repair: repairCommand(profile.name),
   };

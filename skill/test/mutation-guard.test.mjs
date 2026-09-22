@@ -44,7 +44,12 @@ function stubPath() {
 function run(args, env = {}) {
   return spawnSync("node", [CLI, ...args], {
     encoding: "utf8",
-    env: { ...process.env, DEVO_GCLOUD_PROFILES_DIR: root, ...env },
+    env: {
+      ...process.env,
+      DEVO_GCLOUD_PROFILES_DIR: root,
+      DEVO_GCLOUD_LOCK_DIR: join(root, "locks"),
+      ...env,
+    },
   });
 }
 

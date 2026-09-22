@@ -4,8 +4,8 @@
 #
 # This workstation keeps one CLOUDSDK_CONFIG root per identity. A gcloud call
 # without that prefix does not fail; it uses the shared global config and
-# whatever account is active there. That is how Credilex credentials once ended
-# up in the shared root and how a permission error was misread.
+# whatever account is active there. That is how a client's credentials once
+# ended up in the shared root and how a permission error was misread.
 #
 # The roots are also reachable without gcloud ever appearing in the command: a
 # container or a remote host can simply be handed the directory. A container on
@@ -315,6 +315,53 @@ unprefixed=$(printf '%s' "$readable" | tr ';|&(' '\n\n\n\n' \
 if [ -n "$unprefixed" ]; then
   deny "gcloud authentication/configuration command without CLOUDSDK_CONFIG:
   $unprefixed"
+fi
+
+# A word is the gcloud program when its final component is gcloud and it is not
+# the config directory, which ends in the same letters. Defined out here because
+# a `)` inside the command substitution below would close that substitution.
+segment_runs_gcloud() {
+  set -f
+  found=0
+  for word in $1; do
+    case "$word" in
+      *.[Cc][Oo][Nn][Ff][Ii][Gg]/[Gg][Cc][Ll][Oo][Uu][Dd]|*.[Cc][Oo][Nn][Ff][Ii][Gg]/[Gg][Cc][Ll][Oo][Uu][Dd]/*) continue ;;
+    esac
+    case "$word" in
+      [Gg][Cc][Ll][Oo][Uu][Dd]|*/[Gg][Cc][Ll][Oo][Uu][Dd]) found=1 ;;
+    esac
+  done
+  [ "$found" -eq 1 ]
+}
+
+segment_is_profiled_devo() {
+  set -f
+  devo=0
+  for word in $1; do
+    case "$word" in
+      [Dd][Ee][Vv][Oo]|*/[Dd][Ee][Vv][Oo]) devo=1 ;;
+    esac
+  done
+  [ "$devo" -eq 1 ] && printf '%s' "$1" | grep -qiE -- '--profile(=[[:space:]]*[^[:space:]=]+|[[:space:]]+[^-[:space:]][^[:space:]]*)'
+}
+
+# Every remaining gcloud uses the shared ~/.config/gcloud and whichever account
+# was logged in there last. A segment opened by CLOUDSDK_CONFIG was removed
+# above. `devo` with `--profile` is the other call that pins a root itself; a
+# devo call that names no profile does not, and neither does a bare gcloud that
+# happens to contain the letters `--profile`.
+unpinned_gcloud=$(printf '%s' "$readable" | tr ';|&(' '\n\n\n\n' \
+  | sed -E '/^[[:space:]]*CLOUDSDK_CONFIG=/d' \
+  | while IFS= read -r segment || [ -n "$segment" ]; do
+      [ -n "$segment" ] || continue
+      segment_runs_gcloud "$segment" || continue
+      segment_is_profiled_devo "$segment" && continue
+      printf '%s\n' "$segment"
+    done || true)
+
+if [ -n "$unpinned_gcloud" ]; then
+  deny "gcloud without a profile uses the shared ~/.config/gcloud and whichever account was logged in last:
+  $unpinned_gcloud"
 fi
 
 # A store read is judged last, after the trigger above -- and it is still reached

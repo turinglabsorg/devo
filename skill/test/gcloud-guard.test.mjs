@@ -341,7 +341,7 @@ test("leaves ordinary container and shell work alone", async (t) => {
 
 test("keeps the rules that predate the transfer rules", async (t) => {
   const cases = [
-    { expected: 0, command: "gcloud auth list" },
+    { expected: 2, command: "gcloud auth list" },
     { expected: 0, command: "CLOUDSDK_CONFIG=/tmp/root gcloud auth login someone@example.com" },
     { expected: 2, command: "gcloud auth login someone@example.com" },
     { expected: 2, command: "gcloud config configurations activate ragusa" },
@@ -373,16 +373,35 @@ test("keeps the rules that predate the transfer rules", async (t) => {
     { expected: 2, command: "gcloud --quiet auth application-default login" },
     { expected: 2, command: "gcloud auth activate-service-account --key-file=/tmp/key.json" },
     { expected: 2, command: "gcloud config set account someone.else@example.com" },
-    // Read-only, and pinned: neither is a write to the ambient root.
-    { expected: 0, command: "gcloud -q auth list" },
+    // Read-only still uses the shared root when nothing pins a profile.
+    { expected: 2, command: "gcloud -q auth list" },
     { expected: 0, command: "CLOUDSDK_CONFIG=/tmp/root gcloud -q auth login someone@example.com" },
+  ];
+  for (const item of cases) await check(t, item);
+});
+
+test("refuses a gcloud that is not pinned to a profile", async (t) => {
+  const cases = [
+    { expected: 2, command: "gcloud projects list" },
+    { expected: 2, command: "gcloud compute instances list" },
+    { expected: 2, command: "/usr/local/bin/gcloud projects list" },
+    { expected: 2, command: "Gcloud projects list" },
+    { expected: 2, command: "true; gcloud projects list" },
+    { expected: 2, command: "CLOUDSDK_CONFIG=/tmp/root gcloud projects list; gcloud projects list" },
+    { expected: 2, command: "devo gcloud projects list" },
+    { expected: 2, command: "sh -c 'gcloud projects list'" },
+    { expected: 0, command: "CLOUDSDK_CONFIG=/tmp/root gcloud projects list" },
+    { expected: 0, command: "devo gcloud --profile acme -- projects list" },
+    { expected: 0, command: "devo gcloud --profile=acme -- projects list" },
+    { expected: 0, command: "devo exec --profile master -- gcloud version" },
+    { expected: 0, command: "/usr/local/bin/devo gcloud --profile master -- projects list" },
   ];
   for (const item of cases) await check(t, item);
 });
 
 test("leaves the sanctioned routes open", async (t) => {
   const cases = [
-    { expected: 0, command: "devo gcloud --profile credilex --project credilex-gstaging -- projects describe credilex-gstaging" },
+    { expected: 0, command: "devo gcloud --profile acme --project acme-gstaging -- projects describe acme-gstaging" },
     { expected: 0, command: "devo profiles --probe" },
     { expected: 0, command: "devo auth status --record --notify" },
     { expected: 0, command: "devo auth repair master" },
@@ -499,10 +518,10 @@ test("reads the value of a global flag, not only the joined spelling", async (t)
     { expected: 2, command: "gcloud --project inbound-pattern-489808-h0 auth application-default login" },
     { expected: 2, command: "gcloud --account someone@example.com config set account someone.else@example.com" },
     { expected: 2, command: "gcloud --project=inbound-pattern-489808-h0 auth login someone@example.com" },
-    // A flag and its value in front of a subcommand that is not one of these is
-    // still an ordinary call, including when the value is the word `auth`.
-    { expected: 0, command: "gcloud --project inbound-pattern-489808-h0 projects list" },
-    { expected: 0, command: "gcloud --project auth auth list" },
+    // A flag in front of a read is still the shared root: the project flag does
+    // not choose which credential file gcloud opens.
+    { expected: 2, command: "gcloud --project inbound-pattern-489808-h0 projects list" },
+    { expected: 2, command: "gcloud --project auth auth list" },
   ];
   for (const item of cases) await check(t, item);
 });

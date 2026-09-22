@@ -71,6 +71,99 @@ export function historyProfiles() {
   }
 }
 
+/**
+ * The standing alert: the durable half of the desktop notice.
+ *
+ * `display notification` is best effort, and the way it fails is silent. macOS
+ * Focus suppresses the banner while osascript still exits 0, so "delivered" and
+ * "seen" are two different answers and neither one is visible from the process
+ * that raised it. A credential died at 03:44 and was found by hand, mid-task,
+ * hours later, with three failures already written to a log nobody had opened.
+ *
+ * So the notice is not the alert -- the marker is. One file per profile, beside
+ * that profile's own record, written whatever the desktop does, and printed by
+ * the next devo command in a terminal. A silenced banner then costs nothing,
+ * because the alert is still standing when someone finally looks.
+ */
+export function noticePath(profileName) {
+  if (!profileName) {
+    throw new Error("noticePath needs a profile name: the alert is per profile");
+  }
+  return join(historyDir(), `${profileName}.alert`);
+}
+
+/**
+ * Raises the alert for one profile, or refreshes the one already standing.
+ *
+ * The first failure's timestamp is kept. An alert that moved its own `at`
+ * forward on every run would answer "since when" with "an hour ago" for as long
+ * as it stays broken, which is the one question the marker is kept to answer.
+ * `count` carries how many runs have failed since, so a standing alert also
+ * reads as a duration and a rate.
+ */
+export function raiseNotice(profileName, { summary, repair = "", at = new Date().toISOString() }) {
+  const path = noticePath(profileName);
+  mkdirSync(dirname(path), { recursive: true });
+
+  const standing = readNotice(profileName);
+  const notice = {
+    profile: profileName,
+    at: standing?.at || at,
+    lastSeenAt: at,
+    count: (standing?.count || 0) + 1,
+    summary,
+    repair,
+  };
+
+  writeFileSync(path, `${JSON.stringify(notice)}\n`, "utf8");
+  return notice;
+}
+
+/** One profile's standing alert, or null. A marker torn mid-write reads as absent. */
+export function readNotice(profileName) {
+  try {
+    const parsed = JSON.parse(readFileSync(noticePath(profileName), "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Clears the alert. Only a probe that answered calls this: a repair that was
+ * merely started is not evidence that the credential works, and an alert kept
+ * past its cause is an alert people learn to ignore.
+ */
+export function clearNotice(profileName) {
+  try {
+    rmSync(noticePath(profileName), { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Every standing alert, oldest first.
+ *
+ * One unreadable marker is skipped rather than fatal, for the same reason a torn
+ * history line is: a single bad file must not hide the alerts that are intact --
+ * least of all when the bad file is one a dying process left half-written.
+ */
+export function pendingNotices() {
+  let entries = [];
+  try {
+    entries = readdirSync(historyDir()).filter((entry) => entry.length > ".alert".length && entry.endsWith(".alert"));
+  } catch {
+    return [];
+  }
+
+  return entries
+    .map((entry) => readNotice(entry.slice(0, -".alert".length)))
+    .filter((notice) => notice && notice.profile)
+    .sort((left, right) => String(left.at).localeCompare(String(right.at)));
+}
+
 /** Every profile's records, oldest first. */
 export function readHistory({ limit = 500 } = {}) {
   const records = [];
@@ -201,7 +294,16 @@ export function watchStatus() {
   const plist = plistPath();
   const exists = existsSync(plist);
   if (!exists) {
-    return { installed: false, loaded: false, plist, log: logPath(), history: historyDir() };
+    return {
+      installed: false,
+      loaded: false,
+      plist,
+      log: logPath(),
+      history: historyDir(),
+      // An alert can stand with no plist on disk: it was raised by a run that
+      // was typed by hand, and reporting it is the whole point of the marker.
+      pending: pendingNotices(),
+    };
   }
 
   const printed = launchctl(["print", `${domainTarget()}/${WATCH_LABEL}`]);
@@ -223,6 +325,7 @@ export function watchStatus() {
     // A count that silently dropped would read as "the failures went away".
     legacyRecords: legacy,
     legacyHistory: legacyHistoryPath(),
+    pending: pendingNotices(),
     logTail: tailLines(logPath(), 5),
   };
 }

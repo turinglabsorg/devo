@@ -35,21 +35,21 @@ Use `devo.config.example.json` as the schema example. The real `devo.config.json
       },
       "notes": "LETZGO on Google Cloud"
     },
-    "credilex": {
+    "acme": {
       "provider": "gcp",
-      "projectName": "Credilex Staging",
-      "projectId": "credilex-gstaging",
+      "projectName": "Acme Staging",
+      "projectId": "acme-gstaging",
       "projectNumber": "790098789544",
-      "gcloudProfile": "credilex",
-      "sourceRoot": "/Users/zencrust/GIT/@tessor/credilex-datatape-stage-release",
+      "gcloudProfile": "acme",
+      "sourceRoot": "/Users/zencrust/GIT/@tessor/acme-datatape-stage-release",
       "regions": ["europe-west4"],
       "defaultRegion": "europe-west4",
-      "artifactRegistryRepo": "credilex",
-      "services": ["credilex-api"],
+      "artifactRegistryRepo": "acme",
+      "services": ["acme-api"],
       "labels": {
-        "client": "CREDILEX"
+        "client": "ACME"
       },
-      "notes": "Isolated profile credilex / seba@credilex.it. Do not use master/nobrainer."
+      "notes": "Isolated profile acme / human@acme.example. Do not use master/nobrainer."
     },
     "example-aws": {
       "provider": "aws",

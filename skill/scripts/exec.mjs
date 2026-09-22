@@ -4,6 +4,7 @@ import { basename, dirname, join, resolve, sep } from "path";
 
 import { ambientRoot } from "./ambient.mjs";
 import { guardMutation } from "./gcloud.mjs";
+import { withProfileLock } from "./isolate.mjs";
 import {
   assertProjectAllowed,
   listProfiles,
@@ -298,10 +299,11 @@ export function runExec({ profileName, projectId, account, allowMutation, args }
   const { env, warning } = pinnedEnv(profile, { projectId, account: effectiveAccount });
   if (warning) process.stderr.write(warning);
 
-  const result = spawnSync(args[0], args.slice(1), { env, stdio: "inherit" });
-  if (result.error) {
-    throw new Error(`Cannot run ${args[0]}: ${result.error.message}`);
-  }
-
-  return result.status ?? 1;
+  return withProfileLock(profile.name, () => {
+    const result = spawnSync(args[0], args.slice(1), { env, stdio: "inherit" });
+    if (result.error) {
+      throw new Error(`Cannot run ${args[0]}: ${result.error.message}`);
+    }
+    return result.status ?? 1;
+  });
 }

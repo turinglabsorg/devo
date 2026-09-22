@@ -22,7 +22,16 @@ This workstation uses fully isolated gcloud roots. Treat these names as identity
 | --- | --- | --- | --- |
 | `master` | `sebastiano.cataudo@gmail.com` | `/Users/zencrust/.config/gcloud-profiles/master` | Default for PrismaNews and general GCP operations unless the user explicitly selects another identity. |
 | `nobrainer` | `seer@nobraineragency.com` | `/Users/zencrust/.config/gcloud-profiles/nobrainer` | Operations explicitly associated with the Nobrainer identity or a project confirmed to require it. |
-| `credilex` | `seba@credilex.it` | `/Users/zencrust/.config/gcloud-profiles/credilex` | Credilex GCP only. Isolated defaults: account `seba@credilex.it`, project `credilex-gstaging`. Credentials stay in this root (`credentials.db`); never log in to the global `ragusa` config for Credilex. Also visible: `linear-analyst-493018-u6`. Never use `master` or `nobrainer` for Credilex. |
+| `acme` | `human@acme.example` | `/Users/zencrust/.config/gcloud-profiles/acme` | Placeholder for the shape of an organisation profile, which is declared locally rather than here: see `profiles.local.json` below. One profile per organisation, with its own account, its own projects and its own service account. |
+
+A profile that belongs to an organisation is not declared in this repository. It
+lives in `profiles.local.json` in the profiles directory
+(`~/.config/gcloud-profiles/profiles.local.json`), whose entries use the same
+fields as the registry and are merged onto it: `account`, `healthProject`,
+`projectPatterns`, and `serviceAccount` with `email`, `keyName` (a vault secret
+name, never a value) and `project`. Every name in that file stays out of the
+repository, and `devo profiles` reads both. A local entry cannot drop a committed
+field or narrow a project guard -- patterns are appended, never replaced.
 
 Set `CLOUDSDK_CONFIG` on every gcloud invocation. Also pass the account, project, and region explicitly when supported:
 
@@ -39,12 +48,21 @@ CLOUDSDK_CONFIG=/Users/zencrust/.config/gcloud-profiles/nobrainer \
 ```
 
 ```bash
-CLOUDSDK_CONFIG=/Users/zencrust/.config/gcloud-profiles/credilex \
-  gcloud --account=seba@credilex.it \
-  --project=credilex-gstaging COMMAND
+CLOUDSDK_CONFIG=/Users/zencrust/.config/gcloud-profiles/acme \
+  gcloud --account=human@acme.example \
+  --project=acme-gstaging COMMAND
 ```
 
 The same environment prefix is mandatory for Cloud SQL Auth Proxy, client libraries, Terraform/OpenTofu helpers, scripts that invoke gcloud, and any other process that consumes Application Default Credentials. A process without the prefix may silently use the unrelated global ADC file.
+
+`devo gcloud` runs the gcloud on this machine with `CLOUDSDK_CONFIG` set to
+that profile's root. gcloud already exchanges the stored refresh token for a
+new access token when the hour is up. A lock at `~/.devo/locks/<profile>.lock`
+is held for the whole process so two commands cannot write the store at once.
+A second `devo gcloud`, `devo exec`, probe, or repair for that profile waits
+(`DEVO_GCLOUD_LOCK_WAIT_MS`, default 120000) and is refused when the wait runs
+out, naming the pid that holds the store. Two profiles use two locks and can
+run together.
 
 ## Route Calls Through The Router
 
@@ -56,8 +74,8 @@ from the registry in `scripts/profiles.mjs`:
 
 ```bash
 devo profiles
-devo gcloud --profile credilex --project credilex-gprod -- run services list --region europe-west8
-devo gcloud --profile credilex -- run services describe credilex-api --region europe-west8
+devo gcloud --profile acme --project acme-gprod -- run services list --region europe-west8
+devo gcloud --profile acme -- run services describe acme-api --region europe-west8
 ```
 
 - `--profile` is mandatory; omitting it is an error, never a fallback.
@@ -119,10 +137,13 @@ devo gcloud --profile credilex -- run services describe credilex-api --region eu
   command word: a shell wrapper that runs gcloud itself is not inspected (see the
   residual in `test/exec.test.mjs`), which is what the harness hook is for.
 
-A PreToolUse hook (`~/.claude/hooks/gcloud-guard.sh`) denies an unprefixed
-`gcloud auth login`, `gcloud auth application-default login`, `gcloud auth
-activate-service-account`, `gcloud config configurations activate`, `gcloud
-config set account`, `--update-adc`, any read of a credential store
+A PreToolUse hook (`~/.claude/hooks/gcloud-guard.sh`) denies any `gcloud` whose
+shell segment is not opened by `CLOUDSDK_CONFIG` and is not a `devo` command
+with `--profile`. That includes a read (`gcloud projects list`, `gcloud auth
+list`) and an unprefixed `gcloud auth login`, `gcloud auth application-default
+login`, `gcloud auth activate-service-account`, `gcloud config configurations
+activate`, `gcloud config set account`. It also denies `--update-adc`, any read
+of a credential store
 (`credentials.db`, `access_tokens.db`, `application_default_credentials.json`,
 `legacy_credentials`), and any mount, copy or archive of an identity root by a
 container, another host, or a copying tool (`docker`, `docker-compose`, `podman`,
@@ -207,10 +228,23 @@ Authentication is an external mutation and may open a browser. Run these command
 Preferred form, which resolves the root and the account from the registry:
 
 ```bash
-devo auth repair credilex
+devo auth bootstrap acme    # move the profile onto its service account
+devo auth repair acme
 devo auth repair master
 devo auth repair nobrainer
 ```
+
+The human credential is the one that dies: an account-level revocation can
+invalidate the refresh token without warning, and nothing local prevents that.
+`devo auth bootstrap <profile>` is how a profile stops depending on it. It reads
+the key from hush by the name the profile declares -- the value never passes
+through the agent -- and activates the profile from it inside that profile's own
+root, leaving the key file deleted on every exit path. When the key is not in the
+vault it prints the exact sequence that creates it and changes nothing; when the
+vault cannot be read it refuses, because an unreadable vault is not an absent
+key. Two facts decide whether a key can exist at all, and both come first: the
+human's permission to create service accounts and keys, and whether the
+organisation enforces `constraints/iam.disableServiceAccountKeyCreation`.
 
 Expanded, for the gcloud CLI credential store:
 
@@ -225,8 +259,8 @@ CLOUDSDK_CONFIG=/Users/zencrust/.config/gcloud-profiles/nobrainer \
 ```
 
 ```bash
-CLOUDSDK_CONFIG=/Users/zencrust/.config/gcloud-profiles/credilex \
-  gcloud auth login seba@credilex.it
+CLOUDSDK_CONFIG=/Users/zencrust/.config/gcloud-profiles/acme \
+  gcloud auth login human@acme.example
 ```
 
 Only when the target command uses ADC, initialize the matching ADC file separately:
@@ -242,8 +276,8 @@ CLOUDSDK_CONFIG=/Users/zencrust/.config/gcloud-profiles/nobrainer \
 ```
 
 ```bash
-CLOUDSDK_CONFIG=/Users/zencrust/.config/gcloud-profiles/credilex \
-  gcloud auth application-default login seba@credilex.it
+CLOUDSDK_CONFIG=/Users/zencrust/.config/gcloud-profiles/acme \
+  gcloud auth application-default login human@acme.example
 ```
 
 Credential files remain inside the corresponding configuration root and must never be read, printed, copied into this skill, or committed. Validate a profile with a read-only API call, not with `gcloud auth list`: `auth list` answers from the local store and reports green on a dead token.
@@ -253,6 +287,44 @@ devo profiles --probe
 ```
 
 Do not print access tokens or ADC contents.
+
+### When A Profile Dies
+
+The desktop banner is not the alert. macOS Focus suppresses `--notify` while
+osascript still exits 0, so a notice that was never seen and one that was
+delivered look the same from outside; a credential that died at 03:44 was found
+by hand, mid-task, hours later, with the failures already written to a log nobody
+had opened. The alert is a marker on disk, `~/.devo/auth-status/<profile>.alert`,
+written whatever the desktop does and printed by the next `devo auth status` --
+including a `--quiet` run, and including a run scoped to a profile that is
+healthy. It carries the first failure's time and the runs that have failed since,
+and only a probe that answers clears it.
+
+The order that avoids the lost morning:
+
+```bash
+devo auth status                # read the standing alerts before anything else
+devo auth bootstrap <profile>   # if it declares a service account: stop depending on the human
+devo auth repair <profile>      # the only sanctioned repair; it opens a browser
+devo profiles --probe           # confirm with a real API call
+```
+
+A repair brings the profile back until the next revocation. A bootstrap is the
+end of it: the profile then authenticates as its service account, whose key does
+not expire and is not revoked by a password change. The human credential is only
+needed again if that service account is deleted or its key removed.
+
+Run the first before a batch of audit work, not after its first command fails. A
+repair that exits cleanly clears that profile's alert; a failed one keeps it.
+
+Nothing local keeps a refresh token alive, and no schedule of checks changes
+that: a refresh token is not expired by short inactivity, so polling cannot stop
+it from dying -- it buys finding out within the hour. The hourly watchdog
+(`devo auth watch --install`, `devo auth watch` for its state) is that poll. The
+identity that does not die is a non-interactive one -- a service account key,
+which no account-level revocation or session policy reaches -- and that is a
+change in the client's project rather than something this skill does on its own,
+because every profile here is a human identity by design.
 
 If a command returns `PERMISSION_DENIED`, first verify that the selected profile matches the intended client/project. Do not fall back to the other profile unless project ownership is confirmed; this prevents cross-client access and misleading audit results.
 

@@ -14,9 +14,18 @@ import {
 } from "./scripts/doctor.mjs";
 import { ambientRoot, purgeAmbientAccount } from "./scripts/ambient.mjs";
 import { runExec } from "./scripts/exec.mjs";
-import { repairProfile, runGcloud } from "./scripts/gcloud.mjs";
+import { bootstrapProfile, repairProfile, runGcloud } from "./scripts/gcloud.mjs";
 import { findProfile, gcloudProfilesDir, listProfiles, probeProfile } from "./scripts/profiles.mjs";
-import { historyPath, installWatch, uninstallWatch, watchStatus } from "./scripts/watch.mjs";
+import {
+  clearNotice,
+  historyPath,
+  installWatch,
+  noticePath,
+  pendingNotices,
+  raiseNotice,
+  uninstallWatch,
+  watchStatus,
+} from "./scripts/watch.mjs";
 
 const args = process.argv.slice(2);
 const command = args[0] || "help";
@@ -46,6 +55,7 @@ Usage:
   devo exec --profile <name> [--project id] [--account email] [--allow-mutation] -- <command...>
   devo auth status [--profile name] [--quiet] [--notify] [--json] [--record]
   devo auth watch [--install [--interval seconds] | --uninstall]
+  devo auth bootstrap <profile>
   devo auth repair <profile>
   devo auth purge <account> [--yes]
 
@@ -55,7 +65,8 @@ Topics:
 Identity:
   A gcloud call outside its profile root silently uses the shared global config
   and the wrong account. \`devo gcloud\` therefore requires --profile and runs
-  gcloud with CLOUDSDK_CONFIG set to that profile's root.
+  gcloud with CLOUDSDK_CONFIG set to that profile's root. A second command for
+  the same profile does not start while the first still holds the credential store.
 
   A caller that is not gcloud -- the docker CLI and the credential helper it
   spawns, terraform, an ADC client library -- needs the same root and has no
@@ -76,15 +87,16 @@ Examples:
   devo tenant letzgo
   devo profiles
   devo profiles --probe
-  devo gcloud --profile credilex --project credilex-gprod -- run services list --region europe-west8
+  devo gcloud --profile acme --project acme-gprod -- run services list --region europe-west8
   devo exec --profile master -- docker push REGISTRY/IMAGE:TAG
   devo exec --profile master -- terraform apply
   devo auth status
   devo auth watch --install              # hourly launchd watchdog, notifies only on failure
   devo auth watch                        # is it loaded, and when did it last fail
-  devo auth repair credilex
-  devo auth purge seba@credilex.it         # dry run: what the shared root holds
-  devo auth purge seba@credilex.it --yes   # remove it, locally only
+  devo auth bootstrap acme           # activate the service account from hush, or say how to create it
+  devo auth repair acme
+  devo auth purge human@acme.example         # dry run: what the shared root holds
+  devo auth purge human@acme.example --yes   # remove it, locally only
   devo commands --tenant letzgo services
   devo commands gcp logs
   devo commands aws costs
@@ -298,28 +310,81 @@ function authStatus({ quiet, notify, json, record, profileName }) {
   });
   const failing = results.filter((result) => result.ok !== true);
 
+  // The marker is written before anything is printed, so a run that fails on its
+  // way to a terminal -- a closed pipe, a killed launchd job -- has still left
+  // the alert standing for the next command to find.
+  for (const result of results) {
+    if (result.ok === true) clearNotice(result.profile);
+    else {
+      // The sanctioned command, not the expanded `CLOUDSDK_CONFIG=... gcloud auth
+      // login` form the probe carries: the alert is read hours later by someone
+      // deciding what to type, and that is the command they should type. The
+      // expanded form stays in the per-run line and in references/gcp.md, where
+      // it is kept to explain the prefix.
+      raiseNotice(result.profile, {
+        summary: result.summary,
+        repair: `devo auth repair ${result.profile}`,
+      });
+    }
+  }
+
+  const standing = pendingNotices();
+  const delivery =
+    failing.length && notify
+      ? notifyDesktop(
+          "devo auth",
+          failing.map((result) => `${result.profile}: ${result.summary}`).join(" | "),
+        )
+      : null;
+
   if (json) {
-    console.log(JSON.stringify({ checkedAt: new Date().toISOString(), results }, null, 2));
-  } else if (!quiet || failing.length) {
-    // Printed under --record too: the launchd job redirects stdout to a log, and
-    // a failure with nothing in the log is the kind of anomaly that costs an
-    // hour of guessing.
-    for (const result of results) {
-      console.log(`[${result.ok === true ? "ok" : "fail"}] ${result.profile}: ${result.summary}`);
-      if (result.repair) console.log(`       repair: ${result.repair}`);
+    console.log(JSON.stringify({ checkedAt: new Date().toISOString(), results, pending: standing, delivery }, null, 2));
+  } else {
+    if (!quiet || failing.length) {
+      // Printed under --record too: the launchd job redirects stdout to a log, and
+      // a failure with nothing in the log is the kind of anomaly that costs an
+      // hour of guessing.
+      for (const result of results) {
+        console.log(`[${result.ok === true ? "ok" : "fail"}] ${result.profile}: ${result.summary}`);
+        if (result.repair) console.log(`       repair: ${result.repair}`);
+      }
+    }
+
+    // Not subject to --quiet. A flag that silences the per-run lines must not be
+    // able to hide a dead credential: the banner is printed on every run until
+    // the profile answers again.
+    printStandingAlerts(standing);
+
+    if (delivery && !delivery.delivered) {
+      const where = failing.map((result) => noticePath(result.profile)).join(", ");
+      console.log(`[alert] the desktop notice was not delivered (${delivery.error})`);
+      console.log(`        the alert stands at ${where}`);
     }
   }
 
   if (record) recordHistory(results);
 
-  if (failing.length && notify) {
-    notifyDesktop(
-      "devo auth",
-      failing.map((result) => `${result.profile}: ${result.summary}`).join(" | "),
-    );
-  }
-
   return failing.length ? 1 : 0;
+}
+
+/**
+ * The standing alerts, with the profile that failed, since when, and the repair.
+ *
+ * This is the channel a Focus mode cannot swallow. The desktop banner may be
+ * suppressed, the log may never be opened, but the next command typed in a
+ * terminal prints this -- which is the moment the credential is actually needed.
+ */
+function printStandingAlerts(standing) {
+  if (!standing.length) return;
+
+  console.log("");
+  console.log("! unacknowledged credential alert");
+  for (const notice of standing) {
+    const runs = notice.count === 1 ? "1 run" : `${notice.count} runs`;
+    console.log(`  ${notice.profile}: dead since ${notice.at} (${runs} failed)`);
+    console.log(`    ${notice.summary}`);
+    if (notice.repair) console.log(`    repair: ${notice.repair}`);
+  }
 }
 
 /** Fail closed on a name that would otherwise probe nothing and report success. */
@@ -372,12 +437,38 @@ function recordHistory(results) {
   }
 }
 
-/** A desktop notice, so a dead profile is seen without opening a log file. */
+/**
+ * A desktop notice, so a dead profile is seen without opening a log file.
+ *
+ * The return value is the point. This used to spawn osascript and read nothing
+ * back, which made a notice that was never delivered indistinguishable from one
+ * that was: the caller could not report the failure and no caller did. A notice
+ * that failed is now a fact in the log.
+ *
+ * `delivered` still does not mean seen -- macOS Focus suppresses the banner and
+ * osascript exits 0 regardless, which is not something a process can detect. The
+ * alert does not depend on either answer: it is the marker `raiseNotice` writes,
+ * and this is only the courtesy that arrives first.
+ */
 function notifyDesktop(title, message) {
-  spawnSync("osascript", [
-    "-e",
-    `display notification ${JSON.stringify(message)} with title ${JSON.stringify(title)}`,
-  ]);
+  const result = spawnSync(
+    "osascript",
+    ["-e", `display notification ${JSON.stringify(message)} with title ${JSON.stringify(title)}`],
+    // Without an encoding the streams come back as Buffers, so reading the
+    // failure text is not a matter of calling trim on it: the first version of
+    // this read crashed on exactly that, after the alert had already been
+    // raised -- which is the marker earning its place.
+    { encoding: "utf8" },
+  );
+
+  if (result.error) return { delivered: false, error: result.error.message };
+  if (result.status !== 0) {
+    return {
+      delivered: false,
+      error: (result.stderr || "").trim() || `osascript exited ${result.status}`,
+    };
+  }
+  return { delivered: true, error: "" };
 }
 
 function printWatchInstall(report) {
@@ -400,6 +491,7 @@ function printWatchStatus(report) {
     console.log(`  would write: ${report.plist}`);
     console.log(`  would log to: ${report.log}`);
     console.log(`  would record: ${report.history}`);
+    printStandingAlerts(report.pending || []);
     return;
   }
 
@@ -413,6 +505,7 @@ function printWatchStatus(report) {
     console.log(`  last failure: ${report.lastFailure.at}`);
     console.log(`    ${report.lastFailure.profile}: ${report.lastFailure.summary}`);
   }
+  printStandingAlerts(report.pending || []);
   if (report.legacyRecords) {
     console.log(`  note: ${report.legacyRecords} older records from the single-file era are in`);
     console.log(`        ${report.legacyHistory}, and are not counted above`);
@@ -548,12 +641,31 @@ async function main() {
       return;
     }
 
+    if (args[1] === "bootstrap") {
+      if (!args[2]) {
+        throw new Error("Missing profile name. Usage: devo auth bootstrap <profile>");
+      }
+      const bootstrapped = bootstrapProfile(args[2]);
+      // An activation that gcloud accepted is a working credential, so the alert
+      // standing for a dead human token is stale -- the profile no longer
+      // authenticates as the human at all. The next probe is still the authority.
+      if (bootstrapped === 0) clearNotice(args[2]);
+      process.exitCode = bootstrapped;
+      return;
+    }
+
     if (args[1] !== "repair") {
       throw new Error(
-        `Unknown auth subcommand: ${args[1] || "(none)"}. Expected: devo auth status, devo auth watch, devo auth repair <profile>, or devo auth purge <account>`,
+        `Unknown auth subcommand: ${args[1] || "(none)"}. Expected: devo auth status, devo auth watch, devo auth bootstrap <profile>, devo auth repair <profile>, or devo auth purge <account>`,
       );
     }
-    process.exitCode = repairProfile(args[2]);
+    const repaired = repairProfile(args[2]);
+    // A repair that exited cleanly is a credential gcloud accepted, so the alert
+    // standing for it is stale. A repair that failed keeps it: the next probe is
+    // the authority either way, and this only saves a banner that would otherwise
+    // report a dead profile that was just authenticated.
+    if (repaired === 0 && args[2]) clearNotice(args[2]);
+    process.exitCode = repaired;
     return;
   }
 
