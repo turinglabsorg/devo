@@ -66,6 +66,21 @@ test("devo gcloud runs the host gcloud inside the profile root", () => {
   assert.equal(recorded.includes(join(profiles, "other")), false);
 });
 
+test("without a TTY, stdin still reaches gcloud (e.g. --data-file=-)", () => {
+  const bin = join(root, "bin-stdin");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, "gcloud"), "#!/bin/sh\nprintf 'got:'\ncat\n", { mode: 0o755 });
+
+  const result = spawnSync(
+    "node",
+    [CLI, "gcloud", "--profile", "master", "--", "secrets", "versions", "add", "demo", "--data-file=-"],
+    { encoding: "utf8", input: "piped-value", env: lockedEnv({ PATH: `${bin}:${process.env.PATH}` }) },
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "got:piped-value");
+});
+
 test("two profiles lock independently, and a live holder blocks its own profile", () => {
   withLocks("independent", () => {
     const releaseMaster = acquireProfileLock("master");

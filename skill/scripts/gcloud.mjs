@@ -182,9 +182,16 @@ export function runGcloud({ profileName, projectId, account, allowMutation, tty,
     ? args
     : [...(projectId ? ["--project", projectId] : []), "--account", effectiveAccount, ...args];
 
+  // Without a TTY the output is captured, to catch a stale token below, but
+  // stdin is still the caller's: `--data-file=-` and friends read from it, and
+  // a pipe left to the default would hand gcloud an empty one.
   const result = tty
     ? spawnIsolatedGcloud(profile, passthrough, { stdio: "inherit" })
-    : spawnIsolatedGcloud(profile, passthrough, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    : spawnIsolatedGcloud(profile, passthrough, {
+        stdio: ["inherit", "pipe", "pipe"],
+        encoding: "utf8",
+        maxBuffer: 64 * 1024 * 1024,
+      });
 
   if (tty) return result.status ?? 1;
 
